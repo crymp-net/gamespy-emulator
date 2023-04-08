@@ -68,6 +68,9 @@ typedef int socklen_t;
 
 #include "enctypex.h"
 
+#define MASTER_SERVER_HOST "m.crymp.net"
+//#define IS_LOCAL
+
 typedef std::map<std::string, std::string> Dictionary;
 
 SOCKET master_socket;
@@ -246,7 +249,7 @@ struct ClientInfo {
         if(secret)
             crymp["proxy_secret"] = secret;
         crymp["port"] = get("localport");
-        crymp["public_port"] = port;
+        crymp["public_port"] = std::to_string(port);
         crymp["numpl"] = get("numplayers");
         crymp["maxpl"] = get("maxplayers");
         std::string sv_map = get("mapname");
@@ -284,7 +287,7 @@ struct ClientInfo {
 
         ProxyRequest *pr = new ProxyRequest;
         if (pr) {
-            pr->host = "crymp.net";
+            pr->host = MASTER_SERVER_HOST;
             pr->script = "/api/up.php";
             pr->params = crymp;
         }
@@ -1044,7 +1047,11 @@ SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock) {
     else
         s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (!sock) {
-        hostent *h = gethostbyname(req->host == "crymp.net" ? "localhost" : req->host.c_str());
+        #ifdef IS_LOCAL
+        hostent *h = gethostbyname(req->host == MASTER_SERVER_HOST ? "localhost" : req->host.c_str());
+        #else
+        hostent *h = gethostbyname(req->host.c_str());
+        #endif
         if (h) {
             sockaddr_in ci;
             in_addr *ip = (in_addr *)h->h_addr;
@@ -1054,14 +1061,21 @@ SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock) {
             ci.sin_family = AF_INET;
             if (connect(s, (const sockaddr *)&ci, sizeof(ci)) == 0) {
                 sock = s;
-            } else
+            } else {
+                printf("[proxy] [err] failed to connect\n");
                 return 0;
-        } else
+            }
+        } else {
+            printf("[proxy] [err] failed to resolve host name\n");
             return 0;
+        }
     }
     send(sock, data.c_str(), data.length(), 0);
-    static char bf[8];
+    static char bf[800];
     recv(sock, bf, sizeof(bf), 0);
+    if(!strstr(bf, "200 OK"))
+        printf("[proxy] [err] sending server %s:%s to proxy failed\n", req->params["proxy_ip"].c_str(), req->params["port"].c_str());
+    //printf("[proxy] [info] received %s from proxy\n", bf);
     return sock;
 }
 
@@ -1073,7 +1087,7 @@ void proxy_dispatcher() {
         for (auto &it : servers) {
             ProxyRequestPtr req = it->proxifyCrymp();
             if (req) {
-                req->host = "crymp.net";
+                req->host = MASTER_SERVER_HOST;
                 sock = commit_proxy_req(req, sock);
                 delete req;
             }

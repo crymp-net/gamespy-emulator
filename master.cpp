@@ -90,11 +90,12 @@ typedef ProxyRequest *ProxyRequestPtr;
 struct ClientInfo;
 typedef unsigned long long server_id;
 std::map<server_id, ClientInfo *> clients;
-void getServers(std::vector<ClientInfo *> &servers, std::string game = "");
+
 ClientInfo *findServer(int ip, int port, std::string game);
+void getServers(std::vector<ClientInfo *> &servers, std::string game = "");
 void debugOutput(char *buff, int len);
 void debugOutputCArray(char *buff, int len);
-SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock);
+SOCKET sendToProxy(ProxyRequest *req, SOCKET sock);
 int masterPort = 9300;
 
 struct ClientInfo {
@@ -103,7 +104,7 @@ struct ClientInfo {
 
     int ip;
     int port;
-    int sv_port; // !!!Service Port!!!
+    int sv_port; // service port, not a server port!!
     int cookie;
     time_t last_recv;
     int packets;
@@ -161,6 +162,7 @@ struct ClientInfo {
         }
 #endif
     }
+
     ~ClientInfo() {
         if (outp) {
             delete[] outp;
@@ -186,6 +188,7 @@ struct ClientInfo {
             CloseSocket(client_sock);
         }
     }
+
     void requestKill() {
         killed = true;
         if (isTcp) {
@@ -195,15 +198,18 @@ struct ClientInfo {
             last_recv = 0;
         }
     }
+
     bool isDead() {
         return killed || (isTcp && socket_dead) || (!isTcp && (time(0) - last_recv) > TIMEOUT);
     }
+
     std::string get(std::string index) {
         Dictionary::iterator it = params.find(index);
         if (it != params.end())
             return it->second;
         return "";
     }
+
     std::string get(std::string index, int num) {
         Dictionary::iterator it = params.find(index);
         std::string retval = "";
@@ -213,12 +219,15 @@ struct ClientInfo {
             retval = std::to_string(num);
         return retval;
     }
+
     bool has(std::string index) {
         return params.find(index) != params.end();
     }
+
     server_id getId() {
         return ClientInfo::makeId(ip, port, sv_port);
     }
+
     std::string getStringIp(int ip = 0) {
         if (ip == 0)
             ip = this->ip;
@@ -227,6 +236,7 @@ struct ClientInfo {
                std::to_string((ip >> 8) & 255) + "." +
                std::to_string((ip)&255);
     }
+
     ProxyRequestPtr proxifyCrymp() {
 #ifdef PROXY_ENABLED
         Dictionary crymp;
@@ -296,6 +306,7 @@ struct ClientInfo {
         return 0;
 #endif
     }
+
     void processPacket(char *buff, int packet_len) {
         packets++;
         last_recv = time(0);
@@ -698,6 +709,7 @@ struct ClientInfo {
             }
         }
     }
+
     int sendUDPResponse(int len, bool sideBuffer = false) {
         traffic_out += len;
 #ifdef DEBUG
@@ -705,6 +717,7 @@ struct ClientInfo {
 #endif
         return sendto(sv_port == MASTER_PORT ? master_socket : forwarder_socket, sideBuffer ? outp_aside : outp, len, 0, (sockaddr *)&ci, cl);
     }
+
     int sendTCPResponse(int len) {
         traffic_out += len;
 #ifdef DEBUG
@@ -712,6 +725,7 @@ struct ClientInfo {
 #endif
         return send(client_sock, outp, len, SEND_FLAGS);
     }
+
     void forwardBytes(ClientInfo *from, char *buff, int len) {
         if (len > 240)
             len = 240;
@@ -724,9 +738,11 @@ struct ClientInfo {
         memcpy(outp_aside + 10, buff, len);
         sendUDPResponse(len, true);
     }
+
     static inline server_id makeId(int cl_ip, int cl_port, int svc_port) {
         return (((server_id)svc_port) << 48) | ((((server_id)cl_ip) & 0xFFFFFFFF) << 16) | cl_port;
     }
+
     static void recvThread(ClientInfo *client) {
         if (!client)
             return;
@@ -743,6 +759,7 @@ struct ClientInfo {
             }
         }
     }
+
     char *readString(char *&buff, int *len) {
         char *str = buff;
         if (*len <= 0)
@@ -760,6 +777,7 @@ struct ClientInfo {
         buff += i + 1;
         return str;
     }
+
     char *prepareCryptoHeader(char *buff, char *gamekey, int &headerLen) {
         if (crypto_sent) {
             headerLen = 0;
@@ -809,6 +827,7 @@ void getServers(std::vector<ClientInfo *> &servers, std::string game) {
     }
     clientMutex.unlock();
 }
+
 ClientInfo *findServer(int ip, int port, std::string game) {
     clientMutex.lock();
     for (std::map<server_id, ClientInfo *>::iterator it = clients.begin(); it != clients.end(); it++) {
@@ -821,6 +840,7 @@ ClientInfo *findServer(int ip, int port, std::string game) {
     clientMutex.unlock();
     return 0;
 }
+
 void debugOutput(char *p, int len) {
     for (int i = 0; i < len; i++) {
         if (!isalpha(p[i]))
@@ -831,6 +851,7 @@ void debugOutput(char *p, int len) {
     printf("\n\n-----------\n\n");
     fflush(stdout);
 }
+
 void debugOutputCArray(char *p, int len) {
     printf("unsigned char buff[%d]={ ", len);
     for (int i = 0; i < len; i++) {
@@ -838,7 +859,8 @@ void debugOutputCArray(char *p, int len) {
     }
     printf("};\n");
 }
-int deploy_gc() {
+
+int deployGarbageCollector() {
     printf("[gc] garbage collector active\n");
     fflush(stdout);
     while (true) {
@@ -857,7 +879,7 @@ int deploy_gc() {
     }
 }
 
-int deploy_master() {
+int deployMaster() {
     printf("[master] [info] initiating master\n");
     fflush(stdout);
     master_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -908,7 +930,8 @@ int deploy_master() {
     }
     return 0;
 }
-int deploy_fwd_service() {
+
+int deployForwarder() {
     printf("[forwarder] [info] initiating master\n");
     fflush(stdout);
     forwarder_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -959,7 +982,8 @@ int deploy_fwd_service() {
     }
     return 0;
 }
-int deploy_server_browser() {
+
+int deployServerBrowser() {
     printf("[browser] [info] initiating server browser\n");
     fflush(stdout);
     browser_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1014,7 +1038,7 @@ int deploy_server_browser() {
     return 0;
 }
 
-std::string urlencode(std::string str) {
+std::string urlEncode(std::string str) {
     std::string n = "";
     static char hex[17] = "0123456789ABCDEF";
     for (auto c : str) {
@@ -1028,7 +1052,7 @@ std::string urlencode(std::string str) {
     return n;
 }
 
-SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock) {
+SOCKET sendToProxy(ProxyRequest *req, SOCKET sock) {
     printf("[proxy] [info] proxying request for %s (%s:%s)\n", req->params["name"].c_str(), req->params["proxy_ip"].c_str(), req->params["port"].c_str());
     std::string data = "POST " + req->script + " HTTP/1.1\r\nHost: " + req->host + "\r\nContent-type: application/x-www-form-urlencoded\r\nConnection: keep-alive\r\nContent-length: ";
     std::string query = "";
@@ -1036,7 +1060,7 @@ SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock) {
     for (auto &it : req->params) {
         if (!first)
             query += "&";
-        query += it.first + "=" + urlencode(it.second);
+        query += it.first + "=" + urlEncode(it.second);
         first = false;
     }
     data += std::to_string(query.length()) + "\r\n\r\n" + query;
@@ -1079,7 +1103,7 @@ SOCKET commit_proxy_req(ProxyRequest *req, SOCKET sock) {
     return sock;
 }
 
-void proxy_dispatcher() {
+void deployProxyDispatcher() {
     while (true) {
         std::vector<ClientInfo *> servers;
         getServers(servers, "crysis");
@@ -1088,7 +1112,7 @@ void proxy_dispatcher() {
             ProxyRequestPtr req = it->proxifyCrymp();
             if (req) {
                 req->host = MASTER_SERVER_HOST;
-                sock = commit_proxy_req(req, sock);
+                sock = sendToProxy(req, sock);
                 delete req;
             }
         }
@@ -1111,7 +1135,7 @@ int main(int argc, const char **argv) {
     WSAStartup(0x202, &wsaData);
 #endif
 #ifdef PROXY_ENABLED
-    std::thread proxyThread(proxy_dispatcher);
+    std::thread proxyThread(deployProxyDispatcher);
     proxyThread.detach();
 #endif
 #ifdef TEST
@@ -1189,10 +1213,10 @@ int main(int argc, const char **argv) {
     getchar();
 #endif
 #else
-    std::thread master(deploy_master);
-    std::thread browser(deploy_server_browser);
+    std::thread master(deployMaster);
+    std::thread browser(deployServerBrowser);
 #ifdef USE_GC
-    std::thread gc(deploy_gc);
+    std::thread gc(deployGarbageCollector);
 #endif
     master.join();
     browser.join();

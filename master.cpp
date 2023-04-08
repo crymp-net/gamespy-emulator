@@ -246,6 +246,7 @@ struct ClientInfo {
         if(secret)
             crymp["proxy_secret"] = secret;
         crymp["port"] = get("localport");
+        crymp["public_port"] = port;
         crymp["numpl"] = get("numplayers");
         crymp["maxpl"] = get("maxplayers");
         std::string sv_map = get("mapname");
@@ -259,7 +260,7 @@ struct ClientInfo {
         sv_map = nmap;
         // sv_map[0] = sv_map[0] & 0x3F;
         crymp["map"] = std::string("multiplayer/") + std::string((get("gametype") == "InstantAction") ? "ia/" : "ps/") + sv_map;
-        crymp["timel"] = get("timeleft");
+        crymp["timel"] = get("timeleft", 0);
         crymp["ranked"] = get("official");
         crymp["desc"] = "";
         crymp["mappic"] = "";

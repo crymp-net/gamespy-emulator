@@ -66,7 +66,7 @@ typedef int socklen_t;
 #define printf(...) /* */
 #endif
 
-#include "enctypex.h"
+#include "lib/enctypex.h"
 
 #define MASTER_SERVER_HOST "m.crymp.net"
 //#define IS_LOCAL

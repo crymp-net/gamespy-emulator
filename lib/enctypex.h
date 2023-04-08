@@ -46,7 +46,7 @@ typedef struct {
 
 
 
-int enctypex_func5(unsigned char *encxkey, int cnt, unsigned char *id, int idlen, int *n1, int *n2) {
+static int enctypex_func5(unsigned char *encxkey, int cnt, unsigned char *id, int idlen, int *n1, int *n2) {
     int     i,
             tmp,
             mask = 1;
@@ -102,7 +102,7 @@ void enctypex_func4(unsigned char *encxkey, unsigned char *id, int idlen) {
 
 
 
-int enctypex_func7(unsigned char *encxkey, unsigned char d) {
+static int enctypex_func7(unsigned char *encxkey, unsigned char d) {
     unsigned char   a,
                     b,
                     c;
@@ -155,7 +155,7 @@ int enctypex_func7(unsigned char *encxkey, unsigned char d) {
 
 
 
-int enctypex_func7e(unsigned char *encxkey, unsigned char d) {
+static int enctypex_func7e(unsigned char *encxkey, unsigned char d) {
     unsigned char   a,
                     b,
                     c;
@@ -208,7 +208,7 @@ int enctypex_func7e(unsigned char *encxkey, unsigned char d) {
 
 
 
-int enctypex_func6(unsigned char *encxkey, unsigned char *data, int len) {
+static int enctypex_func6(unsigned char *encxkey, unsigned char *data, int len) {
     int     i;
 
     for(i = 0; i < len; i++) {
@@ -219,7 +219,7 @@ int enctypex_func6(unsigned char *encxkey, unsigned char *data, int len) {
 
 
 
-int enctypex_func6e(unsigned char *encxkey, unsigned char *data, int len) {
+static int enctypex_func6e(unsigned char *encxkey, unsigned char *data, int len) {
     int     i;
 
     for(i = 0; i < len; i++) {
@@ -250,7 +250,7 @@ static int enctypex_data_cleaner_level = 2; // 0 = do nothing
 
 
 
-int enctypex_data_cleaner(unsigned char *dst, unsigned char *src, int max) {
+static int enctypex_data_cleaner(unsigned char *dst, unsigned char *src, int max) {
     static const unsigned char strange_chars[] = {
                     ' ','E',' ',',','f',',','.','t',' ','^','%','S','<','E',' ','Z',
                     ' ',' ','`','`','"','"','.','-','-','~','`','S','>','e',' ','Z',
@@ -354,7 +354,7 @@ int enctypex_data_cleaner(unsigned char *dst, unsigned char *src, int max) {
     // data and out can't be the same buffer because in some games like AA the gamespy master server returns
     // 5 bytes for each IP/port and so there is the risk of overwriting the data to handle, that's why I use
     // an output buffer which is at least "(datalen / 5) * 6" bytes long
-int enctypex_decoder_convert_to_ipport(unsigned char *data, int datalen, unsigned char *out, unsigned char *infobuff, int infobuff_size, int infobuff_offset) {
+static int enctypex_decoder_convert_to_ipport(unsigned char *data, int datalen, unsigned char *out, unsigned char *infobuff, int infobuff_size, int infobuff_offset) {
 #define enctypex_infobuff_check(X) \
     if(infobuff) { \
         if((int)(infobuff_size - infobuff_len) <= (int)(X)) { \
@@ -523,7 +523,7 @@ int enctypex_decoder_convert_to_ipport(unsigned char *data, int datalen, unsigne
 
 
 
-int enctypex_decoder_rand_validate(unsigned char *validate) {
+static int enctypex_decoder_rand_validate(unsigned char *validate) {
     int     i,
             rnd;
 
@@ -637,7 +637,7 @@ unsigned char *enctypex_msname(unsigned char *gamename, unsigned char *retname) 
 
 
 
-int enctypex_wrapper(unsigned char *key, unsigned char *validate, unsigned char *data, int size) {
+static int enctypex_wrapper(unsigned char *key, unsigned char *validate, unsigned char *data, int size) {
     int             i;
     unsigned char   *p;
 

@@ -242,6 +242,9 @@ struct ClientInfo {
         crymp["name"] = get("hostname");
         crymp["pass"] = get("password");
         crymp["proxy_ip"] = getStringIp(ip);
+        const char* secret = getenv("PROXY_SECRET");
+        if(secret)
+            crymp["proxy_secret"] = secret;
         crymp["port"] = get("localport");
         crymp["numpl"] = get("numplayers");
         crymp["maxpl"] = get("maxplayers");

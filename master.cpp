@@ -160,7 +160,7 @@ struct ClientInfo
         outp = new char[isTcp ? BROWSER_OUTPUT_BUFFER_SIZE : MASTER_OUTPUT_BUFFER_SIZE];
         inp = isTcp ? new char[4096] : 0;
         encxkeyb = isTcp ? new unsigned char[261] : 0;
-        challenge_str = isTcp ? new unsigned char[8] : 0;
+        challenge_str = isTcp ? new unsigned char[16] : 0;
         outp_aside = isTcp ? 0 : new char[256];
         if (isTcp)
         {
@@ -173,6 +173,16 @@ struct ClientInfo
             std::thread(ClientInfo::recvThread, this).detach();
         }
 #endif
+    }
+
+    template<class T>
+    T safe_get(const nlohmann::json& obj, const std::string& key, const T& def) {
+        if (obj.contains(key)) {
+            return obj[key].get<T>();
+        }
+        else {
+            return def;
+        }
     }
 
     ClientInfo(const nlohmann::json& json) : throwaway(true),
@@ -207,23 +217,23 @@ struct ClientInfo
         port = json["port"].get<int>();
 
         params["gamename"] = "crysis";
-        params["hostname"] = json["name"].get<std::string>();
-        params["localip"] = json["local_ip"].get<std::string>();
+        params["hostname"] = safe_get<std::string>(json, "name", "");
+        params["localip"] = safe_get<std::string>(json, "local_ip", "127.0.0.1");
         if (params["localip"] == "localhost") params["localip"] = "127.0.0.1";
         params["localip0"] = params["localip"];
-        params["localport"] = std::to_string(json["local_port"].get<int>());
-        params["publicport"] = std::to_string(json["public_port"].get<int>());
+        params["localport"] = std::to_string(safe_get<int>(json, "local_port", 64087));
+        params["publicport"] = std::to_string(safe_get<int>(json, "public_port", 64087));
         params["publicip"] = std::to_string(ip);
         params["hostport"] = params["localport"];
 
         params["natneg"] = "1";
         params["country"] = "DE";
 
-        params["password"] = json["pass"].get<std::string>();
-        params["numplayers"] = std::to_string(json["numpl"].get<int>());
-        params["maxplayers"] = std::to_string(json["maxpl"].get<int>());
-        params["mapname"] = json["mapnm"].get<std::string>();
-        params["timeleft"] = std::to_string(json["ntimel"].get<int>());
+        params["password"] = safe_get<std::string>(json, "pass", "0");
+        params["numplayers"] = std::to_string(safe_get<int>(json, "numpl", 0));
+        params["maxplayers"] = std::to_string(safe_get<int>(json, "maxpl", 32));
+        params["mapname"] = safe_get<std::string>(json, "mapnm", "Mesa");
+        params["timeleft"] = std::to_string(safe_get<int>(json, "ntimel", 0));
 
         if (params["timeleft"] == "0") {
             params["timeleft"] = "-";
@@ -233,20 +243,20 @@ struct ClientInfo
             params["timelimit"] = "180";
         }
 
-        params["official"] = std::to_string(json["ranked"].get<int>());
+        params["official"] = std::to_string(safe_get<int>(json, "ranked", 0));
         params["modname"] = "";
         params["modversion"] = "";
 
-        params["gametype"] = json["map"].get<std::string>().find("/ps/") == std::string::npos ? "InstantAction" : "PowerStruggle";
+        params["gametype"] = safe_get<std::string>(json, "map", "multiplayer/ps/mesa").find("/ps/") == std::string::npos ? "InstantAction" : "PowerStruggle";
         params["gamemode"] = "game";
 
-        params["dx10"] = std::to_string(json["dx10"].get<bool>() ? 1 : 0);
-        params["friendlyfire"] = std::to_string(json["friendlyfire"].get<bool>() ? 1 : 0);
-        params["gamepadsonly"] = std::to_string(json["gamepadsonly"].get<bool>() ? 1 : 0);
-        params["dedicated"] = std::to_string(json["dedicated"].get<bool>() ? 1 : 0);
-        params["voicecomm"] = std::to_string(json["voicecomm"].get<bool>() ? 1 : 0);
-        params["anticheat"] = std::to_string(json["anticheat"].get<bool>() ? 1 : 0);
-        params["gamever"] = std::string("1.1.1.") + std::to_string(json["ver"].get<int>());
+        params["dx10"] = std::to_string(safe_get<bool>(json, "dx10", false) ? 1 : 0);
+        params["friendlyfire"] = std::to_string(safe_get<bool>(json, "friendlyfire", false) ? 1 : 0);
+        params["gamepadsonly"] = std::to_string(safe_get<bool>(json, "gamepadsonly", false) ? 1 : 0);
+        params["dedicated"] = std::to_string(safe_get<bool>(json, "dedicated", false) ? 1 : 0);
+        params["voicecomm"] = std::to_string(safe_get<bool>(json, "voicecomm", false) ? 1 : 0);
+        params["anticheat"] = std::to_string(safe_get<bool>(json, "anticheat", false) ? 1 : 0);
+        params["gamever"] = std::string("1.1.1.") + std::to_string(safe_get<int>(json, "ver", 6156));
 
         int i = 0;
         for (auto& player : json["players"])
@@ -259,6 +269,7 @@ struct ClientInfo
             if (player.count("team") > 0)
                 params["team_" + idx] = std::to_string(player["team"].get<int>());
             else params["team_" + idx] = "0";
+            i++;
         }
     }
 
@@ -392,6 +403,7 @@ struct ClientInfo
         // sv_map[0] = sv_map[0] & 0x3F;
         crymp["map"] = std::string("multiplayer/") + std::string((get("gametype") == "InstantAction") ? "ia/" : "ps/") + sv_map;
         crymp["timel"] = get("timeleft", 0);
+        if (crymp["timel"] == "-") crymp["timel"] = "0";
         crymp["ranked"] = get("official");
         crymp["desc"] = "";
         crymp["mappic"] = "";
@@ -606,7 +618,7 @@ struct ClientInfo
             char* challenge = ptr;
             // memcpy(challenge_str, challenge, 8);
             for (int i = 0; i < 8; i++)
-                challenge_str[i] = challenge[i];
+                challenge_str[i + 8] = challenge_str[i] = challenge[i];
             ptr += 10;
             len -= 10;
             std::vector<std::string> params;
@@ -620,7 +632,7 @@ struct ClientInfo
             {
                 if (ptr[i] == '\\' || !ptr[i])
                 {
-                    if(param.length() > 0)
+                    if (param.length() > 0)
                         params.push_back(param);
                     param = "";
                     if (!ptr[i])
@@ -640,6 +652,7 @@ struct ClientInfo
             char* out = ptr;
             ptr = out + 8;
             len = BROWSER_OUTPUT_BUFFER_SIZE - headerLen - 8;
+
             // write params as param1 \0 \0 param2 \0 \0...
             for (size_t i = 0; i < params.size(); i++)
             {
@@ -688,7 +701,7 @@ struct ClientInfo
                     ptr[7] = (server->port) & 255;
                     ptr += 8;
                     len -= 9;
-                    
+
                     printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
 
                     // write server params as \xFF value1 \0 \FF value2 \0 ...
@@ -724,7 +737,7 @@ struct ClientInfo
                 }
 
                 // server list ends as \0 \xFF \xFF \xFF \x FF
-                if(len >= 5) {
+                if (len >= 5) {
                     ptr[0] = 0x00;
                     ptr++;
                     ptr[0] = 0xFF;
@@ -760,9 +773,12 @@ struct ClientInfo
                     printf("[browser] [info] sending server list to %016llX, challenge: %016llX / %016llX\n", getId(), *(unsigned long long*)challenge, *(unsigned long long*)challenge_str);
 
                     sendTCPResponse(len);
-                } else if(headerLen > 0) {
+                }
+                else if (headerLen > 0) {
+                    printf("[browser] [info] sending just header to %016llX\n", getId());
                     // otherwise jsut send header if requested
                     sendTCPResponse(headerLen);
+                    //crypto_sent = false;
                 }
             }
         }
@@ -836,7 +852,7 @@ struct ClientInfo
                     }
                 }
                 // check for final overflow here
-                if(len > 0) {
+                if (len > 0) {
                     *ptr = 0;
                     ptr++;
                 }
@@ -1006,6 +1022,7 @@ struct ClientInfo
             headerLen = 0;
             return buff;
         }
+        memcpy(challenge_str, challenge_str + 8, 8);
         char* ptr = buff;
         headerLen = 37;
 
@@ -1066,8 +1083,9 @@ void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool inte
             auto parsed = nlohmann::json::parse(servers_data);
             for (auto& server : parsed)
             {
-                servers.push_back(std::make_shared<ClientInfo>(server));
-
+                auto sv = std::make_shared<ClientInfo>(server);
+                if(sv->get("hostname").length() > 0)
+                    servers.push_back(sv);
             }
         }
         catch (std::exception& ex)

@@ -793,9 +793,6 @@ struct ClientInfo
         if (len > 240)
             len = 240;
         outp_aside.reset().i16(0xFEFD).i8(0x06);
-        outp_aside[0] = 0xFE;
-        outp_aside[1] = 0xFD;
-        outp_aside[2] = 0x06;
         outp_aside.i32(cookie);
         for (int i = 0; i < 4; i++)
             outp_aside.i8(rand() & 0xFF);

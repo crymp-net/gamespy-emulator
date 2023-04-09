@@ -639,11 +639,13 @@ struct ClientInfo
 
             char* out = ptr;
             ptr = out + 8;
-            len = BROWSER_OUTPUT_BUFFER_SIZE - 8;
+            len = BROWSER_OUTPUT_BUFFER_SIZE - headerLen - 8;
+            // write params as param1 \0 \0 param2 \0 \0...
             for (size_t i = 0; i < params.size(); i++)
             {
                 size_t pl = params[i].length();
-                if (len < pl + 2)
+                // check for possible overflow
+                if (pl + 2 >= len)
                     break;
                 memcpy(ptr, params[i].c_str(), pl + 1);
                 ptr += pl + 1;
@@ -651,6 +653,7 @@ struct ClientInfo
                 ptr++;
                 len -= pl + 2;
             }
+            // if we still have enough space in buffer continue
             if (len > 0)
             {
                 std::vector<ClientInfoRef> servers;
@@ -659,6 +662,7 @@ struct ClientInfo
                 }
                 for (size_t i = 0; i < servers.size(); i++)
                 {
+                    // we need at least 14 bytes for this
                     if (len < 14)
                         break;
 
@@ -667,6 +671,8 @@ struct ClientInfo
                     {
                         continue;
                     }
+
+                    // server header: 9 bytes
                     char type = 0x74;
                     ptr[0] = type;
                     ptr++;
@@ -681,10 +687,11 @@ struct ClientInfo
                     ptr[6] = (server->port >> 8) & 255;
                     ptr[7] = (server->port) & 255;
                     ptr += 8;
-                    len -= 8;
+                    len -= 9;
                     
                     printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
 
+                    // write server params as \xFF value1 \0 \FF value2 \0 ...
                     for (size_t j = 0; j < params.size(); j++)
                     {
                         if (!server->has(params[j]))
@@ -694,33 +701,42 @@ struct ClientInfo
                         }
                         std::string param = server->get(params[j]);
                         size_t pl = param.length();
-                        if (len < pl + 2)
+                        // check for possible overflow
+                        if (pl + 2 >= len)
                             break;
+                        len -= pl + 2;
+                        // it starts with \xFF
                         ptr[0] = 0xFF;
                         ptr++;
                         if (pl == 0)
                         {
+                            // if length is zero, just write zero
                             ptr[0] = 0x00;
                             ptr++;
                         }
                         else
                         {
+                            // otherwise write value with length + 1, as [length + 1] = \0
                             memcpy(ptr, param.c_str(), pl + 1);
                             ptr += pl + 1;
                         }
                     }
                 }
 
-                *ptr = 0x00;
-                ptr++;
-                ptr[0] = 0xFF;
-                ptr[1] = 0xFF;
-                ptr[2] = 0xFF;
-                ptr[3] = 0xFF;
-                ptr += 4;
+                // server list ends as \0 \xFF \xFF \xFF \x FF
+                if(len >= 5) {
+                    ptr[0] = 0x00;
+                    ptr++;
+                    ptr[0] = 0xFF;
+                    ptr[1] = 0xFF;
+                    ptr[2] = 0xFF;
+                    ptr[3] = 0xFF;
+                    ptr += 4;
+                }
 
                 len = ptr - outp;
 
+                // write header with requesters IP, port and num params
                 out[0] = (ip >> 24) & 255;
                 out[1] = (ip >> 16) & 255;
                 out[2] = (ip >> 8) & 255;
@@ -734,18 +750,19 @@ struct ClientInfo
                 out[7] = (num >> 8) & 255;
                 out[6] = (num) & 255;
 
-
 #ifdef DEBUG
                 debugOutput(outp, len);
 #endif
                 if (params.size() > 0) {
+                    // only do this if server list was actually requested
                     enctypex_func6e((unsigned char*)encxkeyb, ((unsigned char*)outp) + headerLen, (int)(len - headerLen));
 
                     printf("[browser] [info] sending server list to %016llX, challenge: %016llX / %016llX\n", getId(), *(unsigned long long*)challenge, *(unsigned long long*)challenge_str);
 
                     sendTCPResponse(len);
-                } else {
-                    sendTCPResponse(37);
+                } else if(headerLen > 0) {
+                    // otherwise jsut send header if requested
+                    sendTCPResponse(headerLen);
                 }
             }
         }
@@ -764,6 +781,7 @@ struct ClientInfo
                 char gamekey[32] = "ZvZDcL";
                 char* ptr = prepareCryptoHeader(outp, gamekey, headerLen);
                 ptr += 20;
+                len -= headerLen;
                 int flags = 0;
                 printf("[browser] [info] server found: %s\n", server->get("hostname").c_str());
                 fflush(stdout);
@@ -774,6 +792,7 @@ struct ClientInfo
                     "gamemode", "timelimit", "password", "anticheat", "official", "voicecomm",
                     "friendlyfire", "dedicated", "dx10", "gamepadsonly", "timeleft" };
                 int numpl = atoi(server->get("numplayers").c_str());
+                // also push player valeus
                 for (int i = 0; i < numpl; i++)
                 {
                     req_params.push_back("player_" + std::to_string(i));
@@ -782,6 +801,7 @@ struct ClientInfo
                     req_params.push_back("deaths_" + std::to_string(i));
                     req_params.push_back("rank_" + std::to_string(i));
                 }
+                // write key value pairs as key \0 value \0 ...
                 for (size_t i = 0; i < req_params.size(); i++)
                 {
                     std::string key = req_params[i];
@@ -799,8 +819,9 @@ struct ClientInfo
                     if (kl == 0)
                         continue;
                     size_t pl = kl + vl + 2;
-                    if (len < pl)
+                    if (pl >= len)
                         break;
+                    len -= pl;
                     memcpy(ptr, key.c_str(), kl + 1);
                     ptr += kl + 1;
                     if (vl == 0)
@@ -814,10 +835,14 @@ struct ClientInfo
                         ptr += vl + 1;
                     }
                 }
-                *ptr = 0;
-                ptr++;
+                // check for final overflow here
+                if(len > 0) {
+                    *ptr = 0;
+                    ptr++;
+                }
                 len = ptr - outp;
 
+                // write header as u16[content length] + 0x2BE + server ip + server port + server local ip + server port + server ip
                 ptr = outp + headerLen;
                 ptr[0] = (len >> 8) & 0xFF;
                 ptr[1] = len & 0xFF;

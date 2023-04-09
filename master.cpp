@@ -1,9 +1,10 @@
 // master.cpp
 #define MASTER
 #define _CRT_SECURE_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define DO_LOG
-// #define TEST
-// #define DEBUG
+//#define TEST 
+//#define DEBUG
 #define USE_GC
 #include <errno.h>
 #include <stdint.h>
@@ -38,8 +39,8 @@ typedef int socklen_t;
 #endif
 #define MSG_DONTWAIT 0
 #endif
-#define SEND_FLAGS MSG_DONTWAIT
-#define RECV_FLAGS MSG_DONTWAIT
+#define SEND_FLAGS 0
+#define RECV_FLAGS 0
 
 #define MASTER_PORT 27900
 #define FORWARDER_PORT 27901
@@ -67,9 +68,7 @@ typedef int socklen_t;
 #endif
 
 #include "lib/enctypex.h"
-
-#define MASTER_SERVER_HOST "m.crymp.net"
-//#define IS_LOCAL
+#include "lib/json.hpp"
 
 typedef std::map<std::string, std::string> Dictionary;
 
@@ -79,26 +78,33 @@ SOCKET browser_socket;
 
 std::mutex clientMutex;
 
-struct ProxyRequest {
+struct ProxyRequest
+{
     std::string host;
     std::string script;
     Dictionary params;
 };
 
-typedef ProxyRequest *ProxyRequestPtr;
+typedef ProxyRequest* ProxyRequestPtr;
 
 struct ClientInfo;
 typedef unsigned long long server_id;
-std::map<server_id, ClientInfo *> clients;
+typedef std::shared_ptr<ClientInfo> ClientInfoRef;
+std::map<server_id, ClientInfoRef> clients;
 
-ClientInfo *findServer(int ip, int port, std::string game);
-void getServers(std::vector<ClientInfo *> &servers, std::string game = "");
-void debugOutput(char *buff, int len);
-void debugOutputCArray(char *buff, int len);
-SOCKET sendToProxy(ProxyRequest *req, SOCKET sock);
-int masterPort = 9300;
+ClientInfoRef findServer(int ip, int port, std::string game, bool internal = false);
+void getServers(std::vector<ClientInfoRef>& servers, std::string game = "", bool internal = false);
+void debugOutput(char* buff, int len);
+void debugOutputCArray(char* buff, int len);
+SOCKET socketForHost(SOCKET sock, const char* host);
+SOCKET sendToProxy(ProxyRequest* req, SOCKET sock);
 
-struct ClientInfo {
+bool remoteList = true;
+std::string masterHost = "m.crymp.net";
+int masterPort = 80;
+
+struct ClientInfo
+{
 
     // Shared ( Server / Client ):
 
@@ -108,8 +114,8 @@ struct ClientInfo {
     int cookie;
     time_t last_recv;
     int packets;
-    int traffic_in;
-    int traffic_out;
+    size_t traffic_in;
+    size_t traffic_out;
     bool killed;
     bool sent_challenge;
 
@@ -117,33 +123,37 @@ struct ClientInfo {
     sockaddr_in ci;
     std::string game;
 
-    char *outp;
-    char *outp_aside;
-    char *inp;
+    char* outp;
+    char* outp_aside;
+    char* inp;
 
     // Client only:
 
+    bool throwaway;
     bool isTcp;
     bool socket_dead;
     bool crypto_sent;
     SOCKET client_sock;
-    unsigned char *encxkeyb;
-    unsigned char *challenge_str;
+    unsigned char* encxkeyb;
+    unsigned char* challenge_str;
 
     Dictionary params;
     ClientInfo(int a_ip, int a_port, int a_sv_port, sockaddr_in s_in, int s_len, SOCKET sock = 0)
         : ip(a_ip),
-          port(a_port),
-          last_recv(0),
-          packets(0),
-          sv_port(a_sv_port),
-          client_sock(sock),
-          socket_dead(false),
-          traffic_in(0),
-          traffic_out(0),
-          killed(false),
-          crypto_sent(false),
-          sent_challenge(false) {
+        port(a_port),
+        last_recv(0),
+        cookie(0),
+        packets(0),
+        sv_port(a_sv_port),
+        client_sock(sock),
+        socket_dead(false),
+        traffic_in(0),
+        traffic_out(0),
+        killed(false),
+        crypto_sent(false),
+        sent_challenge(false),
+        throwaway(false)
+    {
         isTcp = sock != 0;
         ci = s_in;
         cl = s_len;
@@ -152,65 +162,168 @@ struct ClientInfo {
         encxkeyb = isTcp ? new unsigned char[261] : 0;
         challenge_str = isTcp ? new unsigned char[8] : 0;
         outp_aside = isTcp ? 0 : new char[256];
-        if (isTcp) {
+        if (isTcp)
+        {
             memset(encxkeyb, 0, 261);
             memset(challenge_str, 0, 8);
         }
 #ifndef TEST
-        if (isTcp) {
+        if (isTcp)
+        {
             std::thread(ClientInfo::recvThread, this).detach();
         }
 #endif
     }
 
-    ~ClientInfo() {
-        if (outp) {
+    ClientInfo(const nlohmann::json& json) : throwaway(true),
+        traffic_in(0), traffic_out(0), packets(0),
+        cookie(0),
+        sv_port(0),
+        ip(0), port(0), last_recv(0),
+        socket_dead(false),
+        crypto_sent(false),
+        sent_challenge(false),
+        client_sock(0),
+        killed(false),
+        isTcp(false)
+    {
+        memset(&ci, 0, sizeof(ci));
+        cl = sizeof(ci);
+        last_recv = time(0);
+        outp = new char[isTcp ? BROWSER_OUTPUT_BUFFER_SIZE : MASTER_OUTPUT_BUFFER_SIZE];
+        inp = isTcp ? new char[4096] : 0;
+        encxkeyb = isTcp ? new unsigned char[261] : 0;
+        challenge_str = isTcp ? new unsigned char[8] : 0;
+        outp_aside = isTcp ? 0 : new char[256];
+        if (isTcp)
+        {
+            memset(encxkeyb, 0, 261);
+            memset(challenge_str, 0, 8);
+        }
+
+        int a, b, c, d;
+        sscanf(json["ip"].get<std::string>().c_str(), "%d.%d.%d.%d", &a, &b, &c, &d);
+        ip = ((a << 24) | (b << 16) | (c << 8) | d);
+        port = json["port"].get<int>();
+
+        params["gamename"] = "crysis";
+        params["hostname"] = json["name"].get<std::string>();
+        params["localip"] = json["local_ip"].get<std::string>();
+        if (params["localip"] == "localhost") params["localip"] = "127.0.0.1";
+        params["localip0"] = params["localip"];
+        params["localport"] = std::to_string(json["local_port"].get<int>());
+        params["publicport"] = std::to_string(json["public_port"].get<int>());
+        params["publicip"] = std::to_string(ip);
+        params["hostport"] = params["localport"];
+
+        params["natneg"] = "1";
+        params["country"] = "DE";
+
+        params["password"] = json["pass"].get<std::string>();
+        params["numplayers"] = std::to_string(json["numpl"].get<int>());
+        params["maxplayers"] = std::to_string(json["maxpl"].get<int>());
+        params["mapname"] = json["mapnm"].get<std::string>();
+        params["timeleft"] = std::to_string(json["ntimel"].get<int>());
+
+        if (params["timeleft"] == "0") {
+            params["timeleft"] = "-";
+            params["timelimit"] = "-";
+        }
+        else {
+            params["timelimit"] = "180";
+        }
+
+        params["official"] = std::to_string(json["ranked"].get<int>());
+        params["modname"] = "";
+        params["modversion"] = "";
+
+        params["gametype"] = json["map"].get<std::string>().find("/ps/") == std::string::npos ? "InstantAction" : "PowerStruggle";
+        params["gamemode"] = "game";
+
+        params["dx10"] = std::to_string(json["dx10"].get<bool>() ? 1 : 0);
+        params["friendlyfire"] = std::to_string(json["friendlyfire"].get<bool>() ? 1 : 0);
+        params["gamepadsonly"] = std::to_string(json["gamepadsonly"].get<bool>() ? 1 : 0);
+        params["dedicated"] = std::to_string(json["dedicated"].get<bool>() ? 1 : 0);
+        params["voicecomm"] = std::to_string(json["voicecomm"].get<bool>() ? 1 : 0);
+        params["anticheat"] = std::to_string(json["anticheat"].get<bool>() ? 1 : 0);
+        params["gamever"] = std::string("1.1.1.") + std::to_string(json["ver"].get<int>());
+
+        int i = 0;
+        for (auto& player : json["players"])
+        {
+            std::string idx = std::to_string(i);
+            params["player_" + idx] = player["name"].get<std::string>();
+            params["kills_" + idx] = std::to_string(player["kills"].get<int>());
+            params["deaths_" + idx] = std::to_string(player["deaths"].get<int>());
+            params["rank_" + idx] = std::to_string(player["rank"].get<int>());
+            if (player.count("team") > 0)
+                params["team_" + idx] = std::to_string(player["team"].get<int>());
+            else params["team_" + idx] = "0";
+        }
+    }
+
+    ~ClientInfo()
+    {
+        if (outp)
+        {
             delete[] outp;
             outp = 0;
         }
-        if (outp_aside) {
+        if (outp_aside)
+        {
             delete[] outp_aside;
             outp_aside = 0;
         }
-        if (inp) {
+        if (inp)
+        {
             delete[] inp;
             inp = 0;
         }
-        if (encxkeyb) {
+        if (encxkeyb)
+        {
             delete[] encxkeyb;
             encxkeyb = 0;
         }
-        if (challenge_str) {
+        if (challenge_str)
+        {
             delete[] challenge_str;
             challenge_str = 0;
         }
-        if (isTcp && !socket_dead) {
+        if (isTcp && !socket_dead)
+        {
             CloseSocket(client_sock);
         }
     }
 
-    void requestKill() {
+    void requestKill()
+    {
         killed = true;
-        if (isTcp) {
+        if (isTcp)
+        {
             CloseSocket(client_sock);
             socket_dead = true;
-        } else {
+        }
+        else
+        {
             last_recv = 0;
         }
     }
 
-    bool isDead() {
+    bool isDead()
+    {
         return killed || (isTcp && socket_dead) || (!isTcp && (time(0) - last_recv) > TIMEOUT);
     }
 
-    std::string get(std::string index) {
+    std::string get(std::string index)
+    {
         Dictionary::iterator it = params.find(index);
         if (it != params.end())
             return it->second;
         return "";
     }
 
-    std::string get(std::string index, int num) {
+    std::string get(std::string index, int num)
+    {
         Dictionary::iterator it = params.find(index);
         std::string retval = "";
         if (it != params.end())
@@ -220,24 +333,26 @@ struct ClientInfo {
         return retval;
     }
 
-    bool has(std::string index) {
+    bool has(std::string index)
+    {
         return params.find(index) != params.end();
     }
 
-    server_id getId() {
+    server_id getId()
+    {
         return ClientInfo::makeId(ip, port, sv_port);
     }
 
-    std::string getStringIp(int ip = 0) {
-        if (ip == 0)
-            ip = this->ip;
+    static std::string getStringIp(int ip)
+    {
         return std::to_string((ip >> 24) & 255) + "." +
-               std::to_string((ip >> 16) & 255) + "." +
-               std::to_string((ip >> 8) & 255) + "." +
-               std::to_string((ip)&255);
+            std::to_string((ip >> 16) & 255) + "." +
+            std::to_string((ip >> 8) & 255) + "." +
+            std::to_string((ip) & 255);
     }
 
-    ProxyRequestPtr proxifyCrymp() {
+    ProxyRequestPtr proxifyCrymp()
+    {
 #ifdef PROXY_ENABLED
         Dictionary crymp;
         /*
@@ -256,8 +371,10 @@ struct ClientInfo {
         crymp["pass"] = get("password");
         crymp["proxy_ip"] = getStringIp(ip);
         const char* secret = getenv("PROXY_SECRET");
-        if(secret)
+        if (secret)
             crymp["proxy_secret"] = secret;
+        else
+            crymp["proxy_secret"] = "proxy-secret";
         crymp["port"] = get("localport");
         crymp["public_port"] = std::to_string(port);
         crymp["numpl"] = get("numplayers");
@@ -266,7 +383,8 @@ struct ClientInfo {
         if (sv_map == "")
             sv_map = "Mesa";
         std::string nmap = "";
-        for (auto c : sv_map) {
+        for (auto c : sv_map)
+        {
             if (c != ' ')
                 nmap += tolower(c);
         }
@@ -288,16 +406,18 @@ struct ClientInfo {
 
         int numpl = atoi(get("numplayers").c_str());
         std::string players = "";
-        for (int i = 0; i < numpl; i++) {
+        for (int i = 0; i < numpl; i++)
+        {
             players +=
                 std::string("@") + get("player_" + std::to_string(i)) + "%" + get("rank_" + std::to_string(i), 0) + "%" + get("kills_" + std::to_string(i), 0) + "%" + get("deaths_" + std::to_string(i), 0) + "%0" + "%" + get("team_" + std::to_string(i), 0);
         }
         crymp["players"] = players;
         crymp["proxied"] = "1";
 
-        ProxyRequest *pr = new ProxyRequest;
-        if (pr) {
-            pr->host = MASTER_SERVER_HOST;
+        ProxyRequest* pr = new ProxyRequest;
+        if (pr)
+        {
+            pr->host = masterHost;
             pr->script = "/api/up.php";
             pr->params = crymp;
         }
@@ -307,27 +427,32 @@ struct ClientInfo {
 #endif
     }
 
-    void processPacket(char *buff, int packet_len) {
+    void processPacket(char* buff, int packet_len)
+    {
         packets++;
         last_recv = time(0);
         traffic_in += packet_len;
         if (packet_len < 5)
             return;
-        char *out = 0;
-        if (!outp) {
+        char* out = 0;
+        if (!outp)
+        {
             printf("[master] [error] failed to process packet, outp is null!!!\n");
             return;
-        } else {
+        }
+        else
+        {
             outp[0] = 0xFE;
             outp[1] = 0xFD;
             out = outp + 2;
         }
         char type = buff[0];
-        int packet_id = *(int *)(buff + 1);
-        char *payload = buff + 5;
+        int packet_id = *(int*)(buff + 1);
+        char* payload = buff + 5;
         int len = packet_len - 5;
         printf("[master] [info] packet type: %d, packet id: %08X, length: %d\n", type, packet_id, len);
-        if (type == MASTER_REGISTER_SERVER && sv_port == MASTER_PORT) {
+        if (type == MASTER_REGISTER_SERVER && sv_port == MASTER_PORT)
+        {
             game = payload;
             outp[0] = 0xFE;
             outp[1] = 0xFD;
@@ -336,70 +461,92 @@ struct ClientInfo {
                 outp[i + 3] = 0;
             this->sendUDPResponse(11);
             printf("[master] [msg] subscribed %s:%d to game: %s\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), game.c_str());
-        } else if (type == MASTER_UPDATE_SERVER && sv_port == MASTER_PORT) {
+        }
+        else if (type == MASTER_UPDATE_SERVER && sv_port == MASTER_PORT)
+        {
             int n = 0;
             std::string key = "";
             std::string val = "";
             this->cookie = packet_id;
             int p_off = 0;
-            for (int i = 0; i < len; i++) {
+            for (int i = 0; i < len; i++)
+            {
                 char c = payload[i];
-                if (i > 0 && c == 0 && payload[i - 1] == 0) {
+                if (i > 0 && c == 0 && payload[i - 1] == 0)
+                {
                     p_off = i + 3;
                     break;
                 }
-                if (c == 0) {
-                    if (n % 2 == 1) {
+                if (c == 0)
+                {
+                    if (n % 2 == 1)
+                    {
                         params[key] = val;
                         val = "";
                         key = "";
                     }
                     n++;
-                } else
+                }
+                else
                     ((n % 2 == 0) ? key : val) += c;
             }
             std::vector<std::string> indexes;
             int d_off = 0;
-            if ((p_off + 5) < packet_len && payload[p_off] == 'p' && payload[p_off - 1] > 0) {
-                for (int i = p_off; i < len; i++) {
+            if ((p_off + 5) < packet_len && payload[p_off] == 'p' && payload[p_off - 1] > 0)
+            {
+                for (int i = p_off; i < len; i++)
+                {
                     char c = payload[i];
-                    if (!c) {
-                        if (key.length() == 0) {
+                    if (!c)
+                    {
+                        if (key.length() == 0)
+                        {
                             d_off = i + 1;
                             break;
                         }
 
                         indexes.push_back(key);
                         key = "";
-                    } else {
+                    }
+                    else
+                    {
                         key += c;
                     }
                 }
             }
-            if (d_off && (d_off + 5) < packet_len && indexes.size()) {
-                int ctr = 0;
-                for (int i = d_off; i < len; i++) {
+            if (d_off && (d_off + 5) < packet_len && indexes.size())
+            {
+                size_t ctr = 0;
+                for (int i = d_off; i < len; i++)
+                {
                     char c = payload[i];
-                    if (!c) {
+                    if (!c)
+                    {
                         if (val.length() == 0)
                             break;
-                        int idx = ctr / indexes.size();
+                        size_t idx = ctr / indexes.size();
                         std::string item = indexes[ctr % indexes.size()];
                         item += std::to_string(idx);
                         params[item] = val;
                         // printf("item found: %s -> %s\n", item.c_str(), val.c_str());
                         val = "";
                         ctr++;
-                    } else {
+                    }
+                    else
+                    {
                         val += c;
                     }
                 }
             }
-            ClientInfo *existent = findServer(ip, atoi(get("localport").c_str()), game);
             bool existed = false;
-            if (existent && existent != this) {
-                existent->requestKill();
-                existed = true;
+            if (!remoteList)
+            {
+                ClientInfoRef existent = findServer(ip, atoi(get("localport").c_str()), game);
+                if (existent && existent.get() != this)
+                {
+                    existent->requestKill();
+                    existed = true;
+                }
             }
             params["country"] = "KP";
             params["publicip"] = std::to_string(ip);
@@ -408,8 +555,9 @@ struct ClientInfo {
             outp[0] = 0xFE;
             outp[1] = 0xFD;
             outp[2] = 0x01;
-            (*(int *)(outp + 3)) = packet_id; // 3 .. 6
-            for (int i = 0; i < 21; i++) {
+            (*(int*)(outp + 3)) = packet_id; // 3 .. 6
+            for (int i = 0; i < 21; i++)
+            {
                 outp[i + 7] = (rand() % 20) + 65;
             }
             outp[28] = 0;
@@ -418,40 +566,44 @@ struct ClientInfo {
             sent_challenge = true;
             printf("[master] [msg] updated server %s:%d, killed old: %d\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), existed ? 1 : 0);
             // this->proxifyCrymp();
-        } else if (type == MASTER_HEARTBEAT1 || type == MASTER_HEARTBEAT2) {
+        }
+        else if (type == MASTER_HEARTBEAT1 || type == MASTER_HEARTBEAT2)
+        {
             outp[0] = 0xFE;
             outp[1] = 0xFD;
             outp[2] = MASTER_HEARTBEAT1 == type ? 0x0A : MASTER_HEARTBEAT2;
-            (*(int *)(outp + 3)) = packet_id;
+            (*(int*)(outp + 3)) = packet_id;
             this->sendUDPResponse(7);
         }
     }
-    void processFwdPacket(char *buff, int packet_len) {
+    void processFwdPacket(char* buff, int packet_len)
+    {
         if (packet_len < 5)
             return;
         int type = buff[7];
-        if (type == 0) {
-            int cl_id = *(int *)(buff + 8);
-            int local_ip = *(int *)(buff + 15);
-            short local_port = *(short *)(buff + 19);
+        if (type == 0)
+        {
+            int cl_id = *(int*)(buff + 8);
+            int local_ip = *(int*)(buff + 15);
+            short local_port = *(short*)(buff + 19);
             memcpy(outp, buff, 21);
             this->sendUDPResponse(21);
         }
     }
-    void processStream(char *buff, int stream_len) {
+    void processStream(char* buff, size_t stream_len)
+    {
         packets++;
         last_recv = time(0);
         traffic_in += stream_len;
-        char dummy1 = buff[0];
-        char dummy2 = buff[1];
-        char req_type = buff[2];
-        if (req_type == BROWSER_SERVER_LIST) {
-            char *ptr = buff + 9;
-            int len = stream_len - 9;
-            char *game = readString(ptr, &len);
+        char req_type = buff[0];
+        if (req_type == BROWSER_SERVER_LIST)
+        {
+            char* ptr = buff + 7;
+            size_t len = stream_len - 7;
+            char* game = readString(ptr, &len);
             this->game = game;
-            char *gamename = readString(ptr, &len);
-            char *challenge = ptr;
+            char* gamename = readString(ptr, &len);
+            char* challenge = ptr;
             // memcpy(challenge_str, challenge, 8);
             for (int i = 0; i < 8; i++)
                 challenge_str[i] = challenge[i];
@@ -459,17 +611,22 @@ struct ClientInfo {
             len -= 10;
             std::vector<std::string> params;
             std::string param = "";
-            if (len < 0) {
+            if (len < 0)
+            {
                 printf("[browser] [error] stream seems to be too short!!!\n");
                 return;
             }
-            for (int i = 0; i < len; i++) {
-                if (ptr[i] == '\\' || !ptr[i]) {
-                    params.push_back(param);
+            for (int i = 0; i < len; i++)
+            {
+                if (ptr[i] == '\\' || !ptr[i])
+                {
+                    if(param.length() > 0)
+                        params.push_back(param);
                     param = "";
                     if (!ptr[i])
                         break;
-                } else
+                }
+                else
                     param += ptr[i];
             }
             ptr += len;
@@ -480,11 +637,12 @@ struct ClientInfo {
             int headerLen = 0;
             ptr = prepareCryptoHeader(outp, gamekey, headerLen);
 
-            char *out = ptr;
+            char* out = ptr;
             ptr = out + 8;
             len = BROWSER_OUTPUT_BUFFER_SIZE - 8;
-            for (size_t i = 0; i < params.size(); i++) {
-                int pl = params[i].length();
+            for (size_t i = 0; i < params.size(); i++)
+            {
+                size_t pl = params[i].length();
                 if (len < pl + 2)
                     break;
                 memcpy(ptr, params[i].c_str(), pl + 1);
@@ -493,63 +651,60 @@ struct ClientInfo {
                 ptr++;
                 len -= pl + 2;
             }
-            if (len > 0) {
-                std::vector<ClientInfo *> servers;
-                getServers(servers, game);
-                for (size_t i = 0; i < servers.size(); i++) {
+            if (len > 0)
+            {
+                std::vector<ClientInfoRef> servers;
+                if (params.size() > 0) {
+                    getServers(servers, game);
+                }
+                for (size_t i = 0; i < servers.size(); i++)
+                {
                     if (len < 14)
                         break;
 
-                    ClientInfo *server = servers[i];
+                    ClientInfoRef server = servers[i];
                     if (server->isDead())
+                    {
                         continue;
+                    }
                     char type = 0x74;
                     ptr[0] = type;
                     ptr++;
-
                     ptr[0] = (server->ip >> 24) & 255;
                     ptr[1] = (server->ip >> 16) & 255;
                     ptr[2] = (server->ip >> 8) & 255;
                     ptr[3] = (server->ip) & 255;
                     int inn_port = atoi(server->get("localport").c_str());
                     ptr[4] = (inn_port >> 8) & 255;
-                    ptr[5] = (inn_port)&255;
-                    ptr += 6;
-                    len -= 6;
+                    ptr[5] = (inn_port) & 255;
 
-                    if (type & 0x02) {
-                        std::string l_ip = server->get("localip0");
-                        int i0, i1, i2, i3;
-                        sscanf(l_ip.c_str(), "%d.%d.%d.%d", &i0, &i1, &i2, &i3);
-                        ptr[0] = i0;
-                        ptr[1] = i1;
-                        ptr[2] = i2;
-                        ptr[3] = i3;
-                        ptr += 4;
-                        len -= 4;
-                    }
-
-                    if (type & 0x20) {
-                        inn_port = atoi(server->get("localport").c_str());
-                        ptr[0] = (inn_port >> 8) & 255;
-                        ptr[1] = (inn_port)&255;
-                        ptr += 2;
-                        len -= 2;
-                    }
-
+                    ptr[6] = (server->port >> 8) & 255;
+                    ptr[7] = (server->port) & 255;
+                    ptr += 8;
+                    len -= 8;
+                    
                     printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
 
-                    for (size_t j = 0; j < params.size(); j++) {
+                    for (size_t j = 0; j < params.size(); j++)
+                    {
+                        if (!server->has(params[j]))
+                        {
+                            printf("[browser] [err] server %s doesn't have %s key\n", server->get("hostname").c_str(), params[j].c_str());
+                            continue;
+                        }
                         std::string param = server->get(params[j]);
-                        int pl = param.length();
+                        size_t pl = param.length();
                         if (len < pl + 2)
                             break;
                         ptr[0] = 0xFF;
                         ptr++;
-                        if (pl == 0) {
+                        if (pl == 0)
+                        {
                             ptr[0] = 0x00;
                             ptr++;
-                        } else {
+                        }
+                        else
+                        {
                             memcpy(ptr, param.c_str(), pl + 1);
                             ptr += pl + 1;
                         }
@@ -569,37 +724,45 @@ struct ClientInfo {
                 out[0] = (ip >> 24) & 255;
                 out[1] = (ip >> 16) & 255;
                 out[2] = (ip >> 8) & 255;
-                out[3] = (ip)&255;
+                out[3] = (ip) & 255;
 
                 out[4] = (port >> 8) & 255;
                 out[5] = port & 255;
 
-                int num = params.size();
+                size_t num = params.size();
 
                 out[7] = (num >> 8) & 255;
-                out[6] = (num)&255;
+                out[6] = (num) & 255;
+
 
 #ifdef DEBUG
                 debugOutput(outp, len);
 #endif
-                enctypex_func6e((unsigned char *)encxkeyb, ((unsigned char *)outp) + headerLen, len - headerLen);
+                if (params.size() > 0) {
+                    enctypex_func6e((unsigned char*)encxkeyb, ((unsigned char*)outp) + headerLen, (int)(len - headerLen));
 
-                printf("[browser] [info] sending server list to %016llX, challenge: %016llX / %016llX\n", getId(), *(unsigned long long *)challenge, *(unsigned long long *)challenge_str);
+                    printf("[browser] [info] sending server list to %016llX, challenge: %016llX / %016llX\n", getId(), *(unsigned long long*)challenge, *(unsigned long long*)challenge_str);
 
-                sendTCPResponse(len);
+                    sendTCPResponse(len);
+                } else {
+                    sendTCPResponse(37);
+                }
             }
-        } else if (req_type == BROWSER_SERVER_INFO) {
-            int sv_ip = ((buff[3] & 0xFF) << 24) | ((buff[4] & 0xFF) << 16) | ((buff[5] & 0xFF) << 8) | ((buff[6] & 0xFF));
-            int sv_port = ((buff[7] & 0xFF) << 8) | ((buff[8] & 0xFF));
+        }
+        else if (req_type == BROWSER_SERVER_INFO)
+        {
+            int sv_ip = ((buff[1] & 0xFF) << 24) | ((buff[2] & 0xFF) << 16) | ((buff[3] & 0xFF) << 8) | ((buff[4] & 0xFF));
+            int sv_port = ((buff[5] & 0xFF) << 8) | ((buff[6] & 0xFF));
 
             printf("[browser] [info] %016llX requesting info about %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
-            ClientInfo *server = findServer(sv_ip, sv_port, this->game);
-            if (server) {
+            ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
+            if (server)
+            {
                 memset(outp, 0, BROWSER_OUTPUT_BUFFER_SIZE);
                 int headerLen = 0;
-                int len = BROWSER_OUTPUT_BUFFER_SIZE - 20;
+                size_t len = BROWSER_OUTPUT_BUFFER_SIZE - 20;
                 char gamekey[32] = "ZvZDcL";
-                char *ptr = prepareCryptoHeader(outp, gamekey, headerLen);
+                char* ptr = prepareCryptoHeader(outp, gamekey, headerLen);
                 ptr += 20;
                 int flags = 0;
                 printf("[browser] [info] server found: %s\n", server->get("hostname").c_str());
@@ -609,16 +772,18 @@ struct ClientInfo {
                     "hostname", "gamever", "hostport", "mapname", "gametype",
                     "numplayers", "maxplayers",
                     "gamemode", "timelimit", "password", "anticheat", "official", "voicecomm",
-                    "friendlyfire", "dedicated", "dx10", "gamepadsonly", "timeleft"};
+                    "friendlyfire", "dedicated", "dx10", "gamepadsonly", "timeleft" };
                 int numpl = atoi(server->get("numplayers").c_str());
-                for (int i = 0; i < numpl; i++) {
+                for (int i = 0; i < numpl; i++)
+                {
                     req_params.push_back("player_" + std::to_string(i));
                     req_params.push_back("team_" + std::to_string(i));
                     req_params.push_back("kills_" + std::to_string(i));
                     req_params.push_back("deaths_" + std::to_string(i));
                     req_params.push_back("rank_" + std::to_string(i));
                 }
-                for (size_t i = 0; i < req_params.size(); i++) {
+                for (size_t i = 0; i < req_params.size(); i++)
+                {
                     std::string key = req_params[i];
                     if (!server->has(key))
                         continue;
@@ -629,19 +794,22 @@ struct ClientInfo {
                     printf("[browser] [info] adding %s,%s \n", key.c_str(), val.c_str());
                     fflush(stdout);
 #endif
-                    int kl = key.length();
-                    int vl = val.length();
+                    size_t kl = key.length();
+                    size_t vl = val.length();
                     if (kl == 0)
                         continue;
-                    int pl = kl + vl + 2;
+                    size_t pl = kl + vl + 2;
                     if (len < pl)
                         break;
                     memcpy(ptr, key.c_str(), kl + 1);
                     ptr += kl + 1;
-                    if (vl == 0) {
+                    if (vl == 0)
+                    {
                         *ptr = 0;
                         ptr++;
-                    } else {
+                    }
+                    else
+                    {
                         memcpy(ptr, val.c_str(), vl + 1);
                         ptr += vl + 1;
                     }
@@ -665,7 +833,7 @@ struct ClientInfo {
 
                 int inn_port = atoi(server->get("hostport").c_str());
                 ptr[0] = (inn_port >> 8) & 255;
-                ptr[1] = (inn_port)&255;
+                ptr[1] = (inn_port) & 255;
                 ptr += 2;
 
                 int i0, i1, i2, i3;
@@ -678,7 +846,7 @@ struct ClientInfo {
 
                 inn_port = atoi(server->get("hostport").c_str());
                 ptr[0] = (inn_port >> 8) & 255;
-                ptr[1] = (inn_port)&255;
+                ptr[1] = (inn_port) & 255;
                 ptr += 2;
 
                 ptr[0] = (server->ip >> 24) & 255;
@@ -687,46 +855,54 @@ struct ClientInfo {
                 ptr[3] = (server->ip) & 255;
                 ptr += 4;
 
-                printf("[browser] [info] sending server info to %016llX, length: %d bytes, challenge: %016llX\n", getId(), len, *(unsigned long long *)challenge_str);
+                printf("[browser] [info] sending server info to %016llX, length: %zd bytes, challenge: %016llX\n", getId(), len, *(unsigned long long*)challenge_str);
 #ifdef DEBUG
                 debugOutput(outp, len);
 #endif
-                printf("INFO: ");
-                for (int i = 0; i < len; i++) {
-                    printf("%02X", outp[i] & 0xFF);
-                }
-                printf("\n");
-                enctypex_func6e((unsigned char *)encxkeyb, ((unsigned char *)outp) + headerLen, len - headerLen);
+                enctypex_func6e((unsigned char*)encxkeyb, ((unsigned char*)outp) + headerLen, (int)(len - headerLen));
                 sendTCPResponse(len);
             }
-        } else if (req_type == BROWSER_FORWARD) {
+        }
+        else if (req_type == BROWSER_FORWARD)
+        {
             int sv_ip = ((buff[3] & 0xFF) << 24) | ((buff[4] & 0xFF) << 16) | ((buff[5] & 0xFF) << 8) | ((buff[6] & 0xFF));
             int sv_port = ((buff[7] & 0xFF) << 8) | ((buff[8] & 0xFF));
             printf("[browser] [info] %016llX requesting forwarding to %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
-            ClientInfo *server = findServer(sv_ip, sv_port, this->game);
-            if (server) {
+            ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
+            if (server && !server->throwaway)
+            {
                 server->forwardBytes(this, buff + 9, 10);
             }
         }
     }
 
-    int sendUDPResponse(int len, bool sideBuffer = false) {
+    int sendUDPResponse(int len, bool sideBuffer = false)
+    {
         traffic_out += len;
 #ifdef DEBUG
         debugOutputCArray(sideBuffer ? outp_aside : outp, len);
 #endif
-        return sendto(sv_port == MASTER_PORT ? master_socket : forwarder_socket, sideBuffer ? outp_aside : outp, len, 0, (sockaddr *)&ci, cl);
+        return sendto(sv_port == MASTER_PORT ? master_socket : forwarder_socket, sideBuffer ? outp_aside : outp, len, 0, (sockaddr*)&ci, cl);
     }
 
-    int sendTCPResponse(int len) {
+    int sendTCPResponse(size_t len)
+    {
         traffic_out += len;
 #ifdef DEBUG
         debugOutputCArray(outp, len);
+
+        printf("client sock: %d, outp: %p, len: %d", client_sock, outp, len);
 #endif
-        return send(client_sock, outp, len, SEND_FLAGS);
+
+#ifdef TEST
+        return 0;
+#else
+        return send(client_sock, outp, (int)len, SEND_FLAGS);
+#endif
     }
 
-    void forwardBytes(ClientInfo *from, char *buff, int len) {
+    void forwardBytes(ClientInfo* from, char* buff, int len)
+    {
         if (len > 240)
             len = 240;
         outp_aside[0] = 0xFE;
@@ -739,34 +915,54 @@ struct ClientInfo {
         sendUDPResponse(len, true);
     }
 
-    static inline server_id makeId(int cl_ip, int cl_port, int svc_port) {
+    static inline server_id makeId(int cl_ip, int cl_port, int svc_port)
+    {
         return (((server_id)svc_port) << 48) | ((((server_id)cl_ip) & 0xFFFFFFFF) << 16) | cl_port;
     }
 
-    static void recvThread(ClientInfo *client) {
+    static void recvThread(ClientInfo* client)
+    {
         if (!client)
             return;
         printf("[browser] [info] receive thread is active for %016llX\n", client->getId());
-        while (true && client) {
-            int len = recv(client->client_sock, client->inp, 2048, 0);
-            if (len <= 0) {
+        while (true && client)
+        {
+            short hdrlen;
+            int hdr = recv(client->client_sock, (char*)&hdrlen, 2, 0);
+            if (hdr == 0) {
                 client->socket_dead = true;
                 CloseSocket(client->client_sock);
-                printf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), len, strerror(errno));
+                printf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), hdr, strerror(errno));
                 return;
-            } else {
-                client->processStream(client->inp, len);
+            }
+            else if (hdr > 0) {
+                hdrlen = ntohs(hdrlen) - 2;
+                int len = recv(client->client_sock, client->inp, hdrlen, 0);
+                if (len == 0)
+                {
+                    client->socket_dead = true;
+                    CloseSocket(client->client_sock);
+                    printf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), len, strerror(errno));
+                    return;
+                }
+                else if (len > 0)
+                {
+                    client->processStream(client->inp, len);
+                }
             }
         }
     }
 
-    char *readString(char *&buff, int *len) {
-        char *str = buff;
+    char* readString(char*& buff, size_t* len)
+    {
+        char* str = buff;
         if (*len <= 0)
             return str;
-        int i = 0;
-        while (i < *len) {
-            if (buff[i] == 0) {
+        size_t i = 0;
+        while (i < *len)
+        {
+            if (buff[i] == 0)
+            {
                 *len -= i + 1;
                 buff += i + 1;
                 return str;
@@ -778,73 +974,176 @@ struct ClientInfo {
         return str;
     }
 
-    char *prepareCryptoHeader(char *buff, char *gamekey, int &headerLen) {
-        if (crypto_sent) {
+    char* prepareCryptoHeader(char* buff, char* gamekey, int& headerLen)
+    {
+        if (crypto_sent)
+        {
             headerLen = 0;
             return buff;
         }
-        int cryptlen = 10;
-        char *ptr = buff;
-        unsigned char cryptchal[10] = {0};
-        unsigned int servchallen = 25;
-        unsigned char servchal[25] = {0};
-        headerLen = (servchallen + cryptlen) + (sizeof(unsigned char) * 2);
-        unsigned short *backendflags = (unsigned short *)(&cryptchal);
-        for (int i = 0; i < cryptlen; i++) {
-            cryptchal[i] = (unsigned char)rand();
-        }
-        *backendflags = htons(BACKEND_FLAGS);
-        for (unsigned int i = 0; i < servchallen; i++) {
-            servchal[i] = (uint8_t)rand();
-        }
+        char* ptr = buff;
+        headerLen = 37;
 
-        ptr = buff;
-        ptr[0] = cryptlen ^ 0xEC;
-        ptr++;
-        for (int i = 0; i < 10; i++) {
-            ptr[i] = cryptchal[i];
-        }
-        ptr += 10;
-        ptr[0] = servchallen ^ 0xEA;
-        ptr++;
-        for (int i = 0; i < 25; i++) {
-            ptr[i] = servchal[i];
-        }
-        ptr += 25;
+        memset(buff, 'A', 37);
+        buff[0] = 230;
+        buff[1] = 0;
+        buff[2] = 0;
+        buff[11] = 243;
 
-        enctypex_funcx((unsigned char *)encxkeyb, (unsigned char *)gamekey, (unsigned char *)challenge_str, (unsigned char *)servchal, servchallen);
+        enctypex_funcx((unsigned char*)encxkeyb, (unsigned char*)gamekey, (unsigned char*)challenge_str, (unsigned char*)buff + 12, 25);
         crypto_sent = true;
-        return buff + 37;
+        return buff + headerLen;
     }
 };
 
-void getServers(std::vector<ClientInfo *> &servers, std::string game) {
-    servers.clear();
-    clientMutex.lock();
-    for (std::map<server_id, ClientInfo *>::iterator it = clients.begin(); it != clients.end(); it++) {
-        if (it->second && !it->second->isDead() && it->second->sv_port == MASTER_PORT && !it->second->isTcp && (game.length() == 0 || it->second->get("gamename") == game) && it->second->params.size() > 0)
-            servers.push_back(it->second);
-    }
-    clientMutex.unlock();
-}
+void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool internal)
+{
+    if (remoteList && !internal)
+    {
+        SOCKET sock = socketForHost(0, masterHost.c_str());
+        std::string cmd = std::string("GET /api/servers HTTP/1.1\r\nHost: ") + masterHost + "\r\nConnection: close\r\n\r\n";
+        int res = send(sock, cmd.c_str(), (int)cmd.length(), SEND_FLAGS);
+        std::string data;
+        char buf[4000];
+        if (res <= 0)
+        {
+            printf("[browser] [err] failed to send HTTP request to master\n");
+            return;
+        }
+        for (;;)
+        {
+            memset(buf, 0, sizeof(buf));
+            int len = recv(sock, buf, sizeof(buf) - 1, RECV_FLAGS);
+            if (len <= 0)
+            {
+                CloseSocket(sock);
+                break;
+            }
+            else
+            {
+                data.append(buf, buf + len);
+            }
+        }
+        auto pivot = data.find("\r\n\r\n");
+        if (pivot == std::string::npos)
+        {
+            printf("[browser] [err] couldn't find rnrn in master response\n");
+            return;
+        }
+        std::string servers_data = data.substr(pivot + 4);
+        if (servers_data.length() < 2)
+        {
+            printf("[browser] [err] didnt receve any servers\n");
+            return;
+        }
+        try
+        {
+            auto parsed = nlohmann::json::parse(servers_data);
+            for (auto& server : parsed)
+            {
+                servers.push_back(std::make_shared<ClientInfo>(server));
 
-ClientInfo *findServer(int ip, int port, std::string game) {
-    clientMutex.lock();
-    for (std::map<server_id, ClientInfo *>::iterator it = clients.begin(); it != clients.end(); it++) {
-        if (it->second && !it->second->isDead() && it->second->sv_port == MASTER_PORT && !it->second->isTcp && it->second->get("gamename") == game && it->second->ip == ip && atoi(it->second->get("localport").c_str()) == port) {
-            ClientInfo *ci = it->second;
-            clientMutex.unlock();
-            return ci;
+            }
+        }
+        catch (std::exception& ex)
+        {
+            printf("[browser] [err] failed to parse response JSON: %s\n", ex.what());
+            printf("[browser] [err] JSON response: %s\n", servers_data.c_str());
+            servers.clear();
+            return;
         }
     }
-    clientMutex.unlock();
-    return 0;
+    else
+    {
+        servers.clear();
+        clientMutex.lock();
+        for (std::map<server_id, ClientInfoRef>::iterator it = clients.begin(); it != clients.end(); it++)
+        {
+            if (it->second && !it->second->isDead() && it->second->sv_port == MASTER_PORT && !it->second->isTcp && (game.length() == 0 || it->second->get("gamename") == game) && it->second->params.size() > 0)
+                servers.push_back(it->second);
+        }
+        clientMutex.unlock();
+    }
 }
 
-void debugOutput(char *p, int len) {
-    for (int i = 0; i < len; i++) {
-        if (!isalpha(p[i]))
-            printf(" %02X ", p[i] & 0xFF);
+ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
+{
+    if (remoteList && !internal)
+    {
+        SOCKET sock = socketForHost(0, masterHost.c_str());
+        std::string cmd = std::string("GET /api/server?ip=") + ClientInfo::getStringIp(ip) + "&port=" + std::to_string(port) + " HTTP/1.1\r\nHost: " + masterHost + "\r\nConnection: close\r\n\r\n";
+        int res = send(sock, cmd.c_str(), (int)cmd.length(), SEND_FLAGS);
+        std::string data;
+        char buf[4000];
+        if (res <= 0)
+        {
+            printf("[browser] [err/2] failed to send HTTP request to master\n");
+            return 0;
+        }
+        for (;;)
+        {
+            memset(buf, 0, sizeof(buf));
+            int len = recv(sock, buf, sizeof(buf) - 1, RECV_FLAGS);
+            if (len <= 0)
+            {
+                CloseSocket(sock);
+                break;
+            }
+            else
+            {
+                data.append(buf, buf + len);
+            }
+        }
+        auto pivot = data.find("\r\n\r\n");
+        if (pivot == std::string::npos)
+        {
+            printf("[browser] [err/2] couldn't find rnrn in master response\n");
+            return 0;
+        }
+        std::string servers_data = data.substr(pivot + 4);
+        if (servers_data.length() < 2)
+        {
+            printf("[browser] [err/2] didnt receve any servers\n");
+            return 0;
+        }
+        try
+        {
+            auto parsed = nlohmann::json::parse(servers_data);
+            if (parsed.count("ip") == 0) {
+                return nullptr;
+            }
+            return std::make_shared<ClientInfo>(parsed);
+        }
+        catch (std::exception& ex)
+        {
+            printf("[browser] [err/2] failed to parse response JSON: %s\n", ex.what());
+            return 0;
+        }
+    }
+    else
+    {
+        clientMutex.lock();
+        for (std::map<server_id, ClientInfoRef>::iterator it = clients.begin(); it != clients.end(); it++)
+        {
+            if (it->second && !it->second->isDead() && it->second->sv_port == MASTER_PORT && !it->second->isTcp && it->second->get("gamename") == game && it->second->ip == ip && atoi(it->second->get("localport").c_str()) == port)
+            {
+                ClientInfoRef ci = it->second;
+                clientMutex.unlock();
+                return ci;
+            }
+        }
+        clientMutex.unlock();
+        return 0;
+    }
+}
+
+void debugOutput(char* p, int len)
+{
+    for (int i = 0; i < len; i++)
+    {
+
+        if (!isprint((unsigned int)p[i] & 255))
+            printf(" %02X ", (unsigned int)(p[i]) & 0xFF);
         else
             printf("%c", p[i]);
     }
@@ -852,26 +1151,32 @@ void debugOutput(char *p, int len) {
     fflush(stdout);
 }
 
-void debugOutputCArray(char *p, int len) {
+void debugOutputCArray(char* p, int len)
+{
     printf("unsigned char buff[%d]={ ", len);
-    for (int i = 0; i < len; i++) {
+    for (int i = 0; i < len; i++)
+    {
         printf("0x%02X, ", p[i] & 0xFF);
     }
     printf("};\n");
 }
 
-int deployGarbageCollector() {
+int deployGarbageCollector()
+{
     printf("[gc] garbage collector active\n");
     fflush(stdout);
-    while (true) {
+    while (true)
+    {
         clientMutex.lock();
-        for (std::map<server_id, ClientInfo *>::iterator it = clients.begin(); it != clients.end();) {
-            ClientInfo *client = it->second;
-            if (client && client->isDead()) {
+        for (std::map<server_id, ClientInfoRef>::iterator it = clients.begin(); it != clients.end();)
+        {
+            ClientInfoRef client = it->second;
+            if (client && client->isDead())
+            {
                 printf("[gc] [info] removing %016llX for inactivity\n", client->getId());
-                delete client;
                 it = clients.erase(it);
-            } else
+            }
+            else
                 it++;
         }
         clientMutex.unlock();
@@ -879,7 +1184,8 @@ int deployGarbageCollector() {
     }
 }
 
-int deployMaster() {
+int deployMaster()
+{
     printf("[master] [info] initiating master\n");
     fflush(stdout);
     master_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -887,51 +1193,63 @@ int deployMaster() {
     ZeroMem(si);
     si.sin_family = AF_INET;
     si.sin_port = htons(MASTER_PORT);
-    if (bind(master_socket, (sockaddr *)&si, sizeof(si)) < 0) {
+    if (bind(master_socket, (sockaddr*)&si, sizeof(si)) < 0)
+    {
         printf("[master] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
     printf("[master] [info] master online\n");
     fflush(stdout);
     char buffer[2048]; // safe: 2048 > MTU ( 1500 )
-    while (true) {
-        ClientInfo *client;
+    while (true)
+    {
+        ClientInfoRef client;
         sockaddr_in ci;
         socklen_t cl = sizeof(ci);
-        int len = recvfrom(master_socket, buffer, 2048, 0, (sockaddr *)&ci, &cl);
-        if (len < 0) {
+        int len = recvfrom(master_socket, buffer, 2048, 0, (sockaddr*)&ci, &cl);
+        if (len < 0)
+        {
             printf("[master] [error] failed to receive: %s\n", strerror(errno));
         }
         int ip = ntohl(ci.sin_addr.s_addr);
         int port = ntohs(ci.sin_port);
         server_id id = ClientInfo::makeId(ip, port, MASTER_PORT);
-        clientMutex.lock();
-        std::map<server_id, ClientInfo *>::iterator it = clients.find(id);
-        if (it != clients.end()) {
-            client = it->second;
-            if (!client) {
-                clients.erase(it);
-                continue;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex);
+            std::map<server_id, ClientInfoRef>::iterator it = clients.find(id);
+            if (it != clients.end())
+            {
+                client = it->second;
+                if (!client)
+                {
+                    clients.erase(it);
+                    continue;
+                }
+                printf("[master] [info] reusing existing client (%016llX)\n", id);
             }
-            printf("[master] [info] reusing existing client (%016llX)\n", id);
-        } else {
-            client = new ClientInfo(ip, port, MASTER_PORT, ci, cl);
-            if (client) {
-                clients[id] = client;
-            } else {
-                printf("[master] [error] failed to allocate new client!!!\n");
-                continue;
+            else
+            {
+                client = std::make_shared<ClientInfo>(ip, port, MASTER_PORT, ci, cl);
+                if (client)
+                {
+                    clients[id] = client;
+                }
+                else
+                {
+                    printf("[master] [error] failed to allocate new client!!!\n");
+                    continue;
+                }
+                printf("[master] [info] allocated new client (%016llX)\n", id);
             }
-            printf("[master] [info] allocated new client (%016llX)\n", id);
+            printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
         }
-        printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
-        clientMutex.unlock();
         client->processPacket(buffer, len);
     }
     return 0;
 }
 
-int deployForwarder() {
+int deployForwarder()
+{
     printf("[forwarder] [info] initiating master\n");
     fflush(stdout);
     forwarder_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -939,74 +1257,89 @@ int deployForwarder() {
     ZeroMem(si);
     si.sin_family = AF_INET;
     si.sin_port = htons(FORWARDER_PORT);
-    if (bind(forwarder_socket, (sockaddr *)&si, sizeof(si)) < 0) {
+    if (bind(forwarder_socket, (sockaddr*)&si, sizeof(si)) < 0)
+    {
         printf("[forwarder] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
     printf("[forwarder] [info] master online\n");
     fflush(stdout);
     char buffer[2048]; // safe: 2048 > MTU ( 1500 )
-    while (true) {
-        ClientInfo *client;
+    while (true)
+    {
+        ClientInfoRef client;
         sockaddr_in ci;
         socklen_t cl = sizeof(ci);
-        int len = recvfrom(forwarder_socket, buffer, 2048, 0, (sockaddr *)&ci, &cl);
-        if (len < 0) {
+        int len = recvfrom(forwarder_socket, buffer, 2048, 0, (sockaddr*)&ci, &cl);
+        if (len < 0)
+        {
             printf("[forwarder] [error] failed to receive: %s\n", strerror(errno));
         }
         int ip = ntohl(ci.sin_addr.s_addr);
         int port = ntohs(ci.sin_port);
         server_id id = ClientInfo::makeId(ip, port, FORWARDER_PORT);
-        clientMutex.lock();
-        std::map<server_id, ClientInfo *>::iterator it = clients.find(id);
-        if (it != clients.end()) {
-            client = it->second;
-            if (!client) {
-                clients.erase(it);
-                continue;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex);
+            std::map<server_id, ClientInfoRef>::iterator it = clients.find(id);
+            if (it != clients.end())
+            {
+                client = it->second;
+                if (!client)
+                {
+                    clients.erase(it);
+                    continue;
+                }
+                printf("[master] [info] reusing existing client (%016llX)\n", id);
             }
-            printf("[master] [info] reusing existing client (%016llX)\n", id);
-        } else {
-            client = new ClientInfo(ip, port, FORWARDER_PORT, ci, cl);
-            if (client) {
-                clients[id] = client;
-            } else {
-                printf("[master] [error] failed to allocate new client!!!\n");
-                continue;
+            else
+            {
+                client = std::make_shared<ClientInfo>(ip, port, FORWARDER_PORT, ci, cl);
+                if (client)
+                {
+                    clients[id] = client;
+                }
+                else
+                {
+                    printf("[master] [error] failed to allocate new client!!!\n");
+                    continue;
+                }
+                printf("[master] [info] allocated new client (%016llX)\n", id);
             }
-            printf("[master] [info] allocated new client (%016llX)\n", id);
+            printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
         }
-        printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
-        clientMutex.unlock();
         client->processFwdPacket(buffer, len);
     }
     return 0;
 }
 
-int deployServerBrowser() {
+int deployServerBrowser()
+{
     printf("[browser] [info] initiating server browser\n");
     fflush(stdout);
     browser_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
 #ifndef _WIN32
     int optval = 1;
-    setsockopt(browser_socket, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval, sizeof(int));
+    setsockopt(browser_socket, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
 #endif
 
     sockaddr_in si;
     ZeroMem(si);
     si.sin_family = AF_INET;
     si.sin_port = htons(BROWSER_PORT);
-    if (bind(browser_socket, (sockaddr *)&si, sizeof(si)) < 0) {
+    if (bind(browser_socket, (sockaddr*)&si, sizeof(si)) < 0)
+    {
         printf("[browser] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
     listen(browser_socket, 800);
-    while (true) {
+    while (true)
+    {
         sockaddr_in ci;
         socklen_t cl = sizeof(ci);
-        SOCKET client_sock = accept(browser_socket, (sockaddr *)&ci, &cl);
-        if (client_sock < 0) {
+        SOCKET client_sock = accept(browser_socket, (sockaddr*)&ci, &cl);
+        if (client_sock < 0)
+        {
             printf("[browser] [error] failed to accept: %s\n", strerror(errno));
             continue;
         }
@@ -1014,109 +1347,159 @@ int deployServerBrowser() {
         struct timeval tv;
         tv.tv_sec = TIMEOUT;
         tv.tv_usec = 0;
-        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
         int ip = ntohl(ci.sin_addr.s_addr);
         int port = ntohs(ci.sin_port);
         server_id id = ClientInfo::makeId(ip, port, BROWSER_PORT);
         clientMutex.lock();
-        std::map<server_id, ClientInfo *>::iterator it = clients.find(id);
-        ClientInfo *client = 0;
-        if (it != clients.end()) {
+        std::map<server_id, ClientInfoRef>::iterator it = clients.find(id);
+        ClientInfoRef client = 0;
+        if (it != clients.end())
+        {
             printf("[browser] [info] reusing existing client (%016llX)\n", id);
             client = it->second;
-        } else {
-            client = new ClientInfo(ip, port, BROWSER_PORT, ci, cl, client_sock);
-            if (client) {
+        }
+        else
+        {
+            client = std::make_shared<ClientInfo>(ip, port, BROWSER_PORT, ci, cl, client_sock);
+            if (client)
+            {
                 clients[id] = client;
                 printf("[browser] [info] allocated new client (%016llX)\n", id);
-            } else
+            }
+            else
+            {
                 printf("[browser] [error] failed to allocate new client!!!\n");
+            }
         }
         clientMutex.unlock();
     }
     return 0;
 }
 
-std::string urlEncode(std::string str) {
+std::string urlEncode(std::string str)
+{
     std::string n = "";
     static char hex[17] = "0123456789ABCDEF";
-    for (auto c : str) {
-        if (!isalnum(c)) {
+    for (auto c : str)
+    {
+        if (!isalnum(c))
+        {
             n += "%";
             n += hex[(c >> 4) & 0xF];
             n += hex[c & 0xF];
-        } else
+        }
+        else
             n += c;
     }
     return n;
 }
 
-SOCKET sendToProxy(ProxyRequest *req, SOCKET sock) {
+SOCKET socketForHost(SOCKET sock, const char* host)
+{
+    SOCKET s = 0;
+
+    if (sock)
+    {
+        s = sock;
+    }
+    else
+    {
+        s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s < 0) {
+            printf("[sock] [err] failed to create new socket\n");
+            return 0;
+        }
+    }
+
+    if (!sock)
+    {
+        hostent* h = gethostbyname(host);
+        if (h)
+        {
+            sockaddr_in ci;
+            in_addr* ip = (in_addr*)h->h_addr;
+            if (!ip)
+            {
+                printf("[sock] [err] failed to resolve host, null ip\n");
+                return 0;
+            }
+            ZeroMem(ci);
+            ci.sin_addr = *ip;
+            ci.sin_port = htons(masterPort);
+            ci.sin_family = AF_INET;
+            if (connect(s, (const sockaddr*)&ci, sizeof(ci)) == 0)
+            {
+                return s;
+            }
+            else
+            {
+                printf("[sock] [err] failed to connect\n");
+                return 0;
+            }
+        }
+        else
+        {
+            printf("[sock] [err] failed to resolve host name\n");
+            return 0;
+        }
+    }
+    else
+    {
+        return sock;
+    }
+}
+
+SOCKET sendToProxy(ProxyRequest* req, SOCKET sock)
+{
     printf("[proxy] [info] proxying request for %s (%s:%s)\n", req->params["name"].c_str(), req->params["proxy_ip"].c_str(), req->params["port"].c_str());
     std::string data = "POST " + req->script + " HTTP/1.1\r\nHost: " + req->host + "\r\nContent-type: application/x-www-form-urlencoded\r\nConnection: keep-alive\r\nContent-length: ";
     std::string query = "";
     bool first = true;
-    for (auto &it : req->params) {
+    for (auto& it : req->params)
+    {
         if (!first)
             query += "&";
         query += it.first + "=" + urlEncode(it.second);
         first = false;
     }
     data += std::to_string(query.length()) + "\r\n\r\n" + query;
+    sock = socketForHost(sock, req->host.c_str());
 
-    SOCKET s = 0;
-    if (sock)
-        s = sock;
-    else
-        s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (!sock) {
-        #ifdef IS_LOCAL
-        hostent *h = gethostbyname(req->host == MASTER_SERVER_HOST ? "localhost" : req->host.c_str());
-        #else
-        hostent *h = gethostbyname(req->host.c_str());
-        #endif
-        if (h) {
-            sockaddr_in ci;
-            in_addr *ip = (in_addr *)h->h_addr;
-            ZeroMem(ci);
-            ci.sin_addr = *ip;
-            ci.sin_port = htons(masterPort);
-            ci.sin_family = AF_INET;
-            if (connect(s, (const sockaddr *)&ci, sizeof(ci)) == 0) {
-                sock = s;
-            } else {
-                printf("[proxy] [err] failed to connect\n");
-                return 0;
-            }
-        } else {
-            printf("[proxy] [err] failed to resolve host name\n");
-            return 0;
-        }
-    }
-    send(sock, data.c_str(), data.length(), 0);
+    send(sock, data.c_str(), (int)data.length(), 0);
     static char bf[800];
+    memset(bf, 0, sizeof(bf));
     recv(sock, bf, sizeof(bf), 0);
-    if(!strstr(bf, "200 OK"))
+    if (!strstr(bf, "200 OK"))
+    {
         printf("[proxy] [err] sending server %s:%s to proxy failed\n", req->params["proxy_ip"].c_str(), req->params["port"].c_str());
-    //printf("[proxy] [info] received %s from proxy\n", bf);
+        printf("request: %s\n", query.c_str());
+        printf("response: %s\n", bf);
+    }
+    // printf("[proxy] [info] received %s from proxy\n", bf);
     return sock;
 }
 
-void deployProxyDispatcher() {
-    while (true) {
-        std::vector<ClientInfo *> servers;
-        getServers(servers, "crysis");
+void deployProxyDispatcher()
+{
+    while (true)
+    {
+        std::vector<ClientInfoRef> servers;
+        getServers(servers, "crysis", true);
         SOCKET sock = 0;
-        for (auto &it : servers) {
+        for (auto& it : servers)
+        {
             ProxyRequestPtr req = it->proxifyCrymp();
-            if (req) {
-                req->host = MASTER_SERVER_HOST;
+            if (req)
+            {
+                req->host = masterHost;
                 sock = sendToProxy(req, sock);
                 delete req;
             }
         }
-        if (sock) {
+        if (sock)
+        {
             CloseSocket(sock);
             sock = 0;
         }
@@ -1124,10 +1507,21 @@ void deployProxyDispatcher() {
     }
 }
 
-int main(int argc, const char **argv) {
-    for (int i = 0; i < argc - 1; i++) {
-        if (strcmp(argv[i], "-p") == 0) {
+int main(int argc, const char** argv)
+{
+    for (int i = 0; i < argc - 1; i++)
+    {
+        if (strcmp(argv[i], "-p") == 0)
+        {
             masterPort = atoi(argv[i + 1]);
+        }
+        if (strcmp(argv[i], "-h") == 0)
+        {
+            masterHost = argv[i + 1];
+        }
+        if (strcmp(argv[i], "-r") == 0)
+        {
+            remoteList = strcmp(argv[i + 1], "0") != 0;
         }
     }
 #ifdef _WIN32
@@ -1141,8 +1535,9 @@ int main(int argc, const char **argv) {
 #ifdef TEST
     sockaddr_in si;
     ZeroMem(si);
-    for (int i = 0; i < 2; i++) {
-        ClientInfo *server = new ClientInfo(INADDR_LOOPBACK, 21330 + i, MASTER_PORT, si, 0, 0);
+    for (int i = 0; i < 2; i++)
+    {
+        ClientInfoRef server = std::make_shared<ClientInfo>(INADDR_LOOPBACK, 21330 + i, MASTER_PORT, si, 0, 0);
         server->params["localip0"] = "192.168.1.105";
         server->params["localport"] = std::to_string(64087 + i);
         server->params["hostport"] = std::to_string(64087 + i);
@@ -1172,13 +1567,13 @@ int main(int argc, const char **argv) {
         clients[server->getId()] = server;
 
         char req0[] = "\x03\xcd\x98\x07\x3a"
-                      "test\x00var\x00\x00\x00\x05player_\x00kills_\x00\x64\x65\x61ths_\x00rank_\x00\x00"
-                      "Zi;\x00\x31\x00\x31\x00\x31\x00\x43omrade\x00\x32\x00\x33\x00\x34\x00\x00\x00";
+            "test\x00var\x00\x00\x00\x05player_\x00kills_\x00\x64\x65\x61ths_\x00rank_\x00\x00"
+            "Zi;\x00\x31\x00\x31\x00\x31\x00\x43omrade\x00\x32\x00\x33\x00\x34\x00\x00\x00";
 
         server->processPacket(req0, 74);
     }
 
-    ClientInfo *client = new ClientInfo(INADDR_LOOPBACK, 5004, BROWSER_PORT, si, 0, 1);
+    ClientInfoRef client = std::make_shared<ClientInfo>(INADDR_LOOPBACK, 5004, BROWSER_PORT, si, 0, 1);
     unsigned char req1[] = {
         0x00, 0xd0, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00,
         0x00, 0x63, 0x72, 0x79, 0x73, 0x69, 0x73, 0x00,
@@ -1205,13 +1600,11 @@ int main(int argc, const char **argv) {
         0x5c, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x72, 0x79,
         0x5c, 0x6d, 0x6f, 0x64, 0x6e, 0x61, 0x6d, 0x65,
         0x5c, 0x6d, 0x6f, 0x64, 0x76, 0x65, 0x72, 0x73,
-        0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00};
-    client->processStream((char *)req1, sizeof(req1));
-    unsigned char req2[] = {0x00, 0x09, 0x01, 0x7F, 0x00, 0x00, 0x01, 0xfa, 0x57};
-    client->processStream((char *)req2, sizeof(req2));
-#ifdef _WIN32
-    getchar();
-#endif
+        0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    client->processStream((char*)req1, sizeof(req1));
+    printf("sending second request\n");
+    unsigned char req2[] = { 0x00, 0x09, 0x01, 0x7F, 0x00, 0x00, 0x01, 0xfa, 0x57 };
+    client->processStream((char*)req2, sizeof(req2));
 #else
     std::thread master(deployMaster);
     std::thread browser(deployServerBrowser);

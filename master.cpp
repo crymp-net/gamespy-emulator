@@ -69,6 +69,7 @@ typedef int socklen_t;
 
 #include "lib/enctypex.h"
 #include "lib/json.hpp"
+#include "iobuf.h"
 
 typedef std::map<std::string, std::string> Dictionary;
 
@@ -94,8 +95,8 @@ std::map<server_id, ClientInfoRef> clients;
 
 ClientInfoRef findServer(int ip, int port, std::string game, bool internal = false);
 void getServers(std::vector<ClientInfoRef>& servers, std::string game = "", bool internal = false);
-void debugOutput(char* buff, int len);
-void debugOutputCArray(char* buff, int len);
+void debugOutput(const char* buff, int len);
+void debugOutputCArray(const char* buff, int len);
 SOCKET socketForHost(SOCKET sock, const char* host);
 SOCKET sendToProxy(ProxyRequest* req, SOCKET sock);
 
@@ -123,8 +124,8 @@ struct ClientInfo
     sockaddr_in ci;
     std::string game;
 
-    char* outp;
-    char* outp_aside;
+    IOBuf outp;
+    IOBuf outp_aside;
     char* inp;
 
     // Client only:
@@ -157,11 +158,9 @@ struct ClientInfo
         isTcp = sock != 0;
         ci = s_in;
         cl = s_len;
-        outp = new char[isTcp ? BROWSER_OUTPUT_BUFFER_SIZE : MASTER_OUTPUT_BUFFER_SIZE];
         inp = isTcp ? new char[4096] : 0;
         encxkeyb = isTcp ? new unsigned char[261] : 0;
         challenge_str = isTcp ? new unsigned char[16] : 0;
-        outp_aside = isTcp ? 0 : new char[256];
         if (isTcp)
         {
             memset(encxkeyb, 0, 261);
@@ -200,11 +199,9 @@ struct ClientInfo
         memset(&ci, 0, sizeof(ci));
         cl = sizeof(ci);
         last_recv = time(0);
-        outp = new char[isTcp ? BROWSER_OUTPUT_BUFFER_SIZE : MASTER_OUTPUT_BUFFER_SIZE];
         inp = isTcp ? new char[4096] : 0;
         encxkeyb = isTcp ? new unsigned char[261] : 0;
         challenge_str = isTcp ? new unsigned char[8] : 0;
-        outp_aside = isTcp ? 0 : new char[256];
         if (isTcp)
         {
             memset(encxkeyb, 0, 261);
@@ -275,16 +272,6 @@ struct ClientInfo
 
     ~ClientInfo()
     {
-        if (outp)
-        {
-            delete[] outp;
-            outp = 0;
-        }
-        if (outp_aside)
-        {
-            delete[] outp_aside;
-            outp_aside = 0;
-        }
         if (inp)
         {
             delete[] inp;
@@ -439,39 +426,28 @@ struct ClientInfo
 #endif
     }
 
-    void processPacket(char* buff, int packet_len)
+    void processPacket(const char* buff, int packet_len)
     {
         packets++;
         last_recv = time(0);
         traffic_in += packet_len;
         if (packet_len < 5)
             return;
-        char* out = 0;
-        if (!outp)
-        {
-            printf("[master] [error] failed to process packet, outp is null!!!\n");
-            return;
-        }
-        else
-        {
-            outp[0] = 0xFE;
-            outp[1] = 0xFD;
-            out = outp + 2;
-        }
-        char type = buff[0];
-        int packet_id = *(int*)(buff + 1);
-        char* payload = buff + 5;
-        int len = packet_len - 5;
-        printf("[master] [info] packet type: %d, packet id: %08X, length: %d\n", type, packet_id, len);
+        outp.reset();
+        outp.i8(0xFE).i8(0xFD);
+
+        IOBuf rd; rd.bytes(buff, (size_t)packet_len);
+        rd.seek(0);
+        char type = rd.i8();
+        int packet_id = rd.i32();
+        printf("[master] [info] packet type: %d, packet id: %08X, length: %d\n", type, packet_id, packet_len);
         if (type == MASTER_REGISTER_SERVER && sv_port == MASTER_PORT)
         {
-            game = payload;
-            outp[0] = 0xFE;
-            outp[1] = 0xFD;
-            outp[2] = 0x09;
+            game = rd.sz();
+            outp.i8(0x09);
             for (int i = 0; i < 8; i++)
-                outp[i + 3] = 0;
-            this->sendUDPResponse(11);
+                outp.i8(0);
+            this->sendUDPResponse(outp.size());
             printf("[master] [msg] subscribed %s:%d to game: %s\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), game.c_str());
         }
         else if (type == MASTER_UPDATE_SERVER && sv_port == MASTER_PORT)
@@ -481,10 +457,10 @@ struct ClientInfo
             std::string val = "";
             this->cookie = packet_id;
             int p_off = 0;
-            for (int i = 0; i < len; i++)
+            for (int i = 0; i < rd.capacity(); i++)
             {
-                char c = payload[i];
-                if (i > 0 && c == 0 && payload[i - 1] == 0)
+                char c = rd[i];
+                if (i > 0 && c == 0 && rd[i - 1] == 0)
                 {
                     p_off = i + 3;
                     break;
@@ -504,11 +480,11 @@ struct ClientInfo
             }
             std::vector<std::string> indexes;
             int d_off = 0;
-            if ((p_off + 5) < packet_len && payload[p_off] == 'p' && payload[p_off - 1] > 0)
+            if ((p_off + 5) < packet_len && rd[p_off] == 'p' && rd[p_off - 1] > 0)
             {
-                for (int i = p_off; i < len; i++)
+                for (int i = p_off; i < rd.capacity(); i++)
                 {
-                    char c = payload[i];
+                    char c = rd[i];
                     if (!c)
                     {
                         if (key.length() == 0)
@@ -529,9 +505,9 @@ struct ClientInfo
             if (d_off && (d_off + 5) < packet_len && indexes.size())
             {
                 size_t ctr = 0;
-                for (int i = d_off; i < len; i++)
+                for (int i = d_off; i < rd.capacity(); i++)
                 {
-                    char c = payload[i];
+                    char c = rd[i];
                     if (!c)
                     {
                         if (val.length() == 0)
@@ -564,28 +540,24 @@ struct ClientInfo
             params["publicip"] = std::to_string(ip);
             params["publicport"] = get("localport");
             params["localip"] = get("localip0");
-            outp[0] = 0xFE;
-            outp[1] = 0xFD;
-            outp[2] = 0x01;
-            (*(int*)(outp + 3)) = packet_id; // 3 .. 6
+            outp.i8(0x01);
+            outp.i32(packet_id);
             for (int i = 0; i < 21; i++)
             {
-                outp[i + 7] = (rand() % 20) + 65;
+                outp.i8((rand() % 20) + 65);
             }
-            outp[28] = 0;
+            outp.i8(0);
             if (!sent_challenge)
-                this->sendUDPResponse(29);
+                this->sendUDPResponse(outp.size());
             sent_challenge = true;
             printf("[master] [msg] updated server %s:%d, killed old: %d\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), existed ? 1 : 0);
             // this->proxifyCrymp();
         }
         else if (type == MASTER_HEARTBEAT1 || type == MASTER_HEARTBEAT2)
         {
-            outp[0] = 0xFE;
-            outp[1] = 0xFD;
-            outp[2] = MASTER_HEARTBEAT1 == type ? 0x0A : MASTER_HEARTBEAT2;
-            (*(int*)(outp + 3)) = packet_id;
-            this->sendUDPResponse(7);
+            outp.i8(MASTER_HEARTBEAT1 == type ? 0x0A : MASTER_HEARTBEAT2);
+            outp.i32(packet_id);
+            this->sendUDPResponse(outp.size());
         }
     }
     void processFwdPacket(char* buff, int packet_len)
@@ -598,206 +570,124 @@ struct ClientInfo
             int cl_id = *(int*)(buff + 8);
             int local_ip = *(int*)(buff + 15);
             short local_port = *(short*)(buff + 19);
-            memcpy(outp, buff, 21);
-            this->sendUDPResponse(21);
+            outp.reset().bytes(buff, 21);
+            this->sendUDPResponse(outp.size());
         }
     }
-    void processStream(char* buff, size_t stream_len)
+
+    void processStream(const char* buff, size_t stream_len)
     {
         packets++;
         last_recv = time(0);
         traffic_in += stream_len;
-        char req_type = buff[0];
+        IOBuf rd; rd.bytes(buff, stream_len);
+        rd.seek(0);
+        char req_type = rd.i8();
         if (req_type == BROWSER_SERVER_LIST)
         {
-            char* ptr = buff + 7;
-            size_t len = stream_len - 7;
-            char* game = readString(ptr, &len);
-            this->game = game;
-            char* gamename = readString(ptr, &len);
-            char* challenge = ptr;
-            // memcpy(challenge_str, challenge, 8);
+            rd.seek(7);
+            this->game = rd.sz();
+            rd.sz();
             for (int i = 0; i < 8; i++)
-                challenge_str[i + 8] = challenge_str[i] = challenge[i];
-            ptr += 10;
-            len -= 10;
+                challenge_str[i + 8] = challenge_str[i] = rd.i8();
+            rd.i16();
             std::vector<std::string> params;
             std::string param = "";
-            if (len < 0)
+            for (int i = 0; i < rd.capacity(); i++)
             {
-                printf("[browser] [error] stream seems to be too short!!!\n");
-                return;
-            }
-            for (int i = 0; i < len; i++)
-            {
-                if (ptr[i] == '\\' || !ptr[i])
+                char c = rd[i];
+                if (c == '\\' || !c)
                 {
                     if (param.length() > 0)
                         params.push_back(param);
                     param = "";
-                    if (!ptr[i])
+                    if (!c)
                         break;
                 }
                 else
-                    param += ptr[i];
+                    param += c;
             }
-            ptr += len;
 
-            memset(outp, 0, BROWSER_OUTPUT_BUFFER_SIZE);
-
+            outp.reset();
+            
             char gamekey[32] = "ZvZDcL";
             int headerLen = 0;
-            ptr = prepareCryptoHeader(outp, gamekey, headerLen);
+            prepareCryptoHeader(outp, gamekey, headerLen);
 
-            char* out = ptr;
-            ptr = out + 8;
-            len = BROWSER_OUTPUT_BUFFER_SIZE - headerLen - 8;
+            // write header with requesters IP, port and num params
+            outp.I32(ip).I16(port).i16((int)params.size());
 
             // write params as param1 \0 \0 param2 \0 \0...
             for (size_t i = 0; i < params.size(); i++)
             {
-                size_t pl = params[i].length();
-                // check for possible overflow
-                if (pl + 2 >= len)
-                    break;
-                memcpy(ptr, params[i].c_str(), pl + 1);
-                ptr += pl + 1;
-                ptr[0] = 0;
-                ptr++;
-                len -= pl + 2;
+                outp.sz(params[i]).i8(0);
             }
+            
             // if we still have enough space in buffer continue
-            if (len > 0)
-            {
-                std::vector<ClientInfoRef> servers;
-                if (params.size() > 0) {
-                    getServers(servers, game);
-                }
-                for (size_t i = 0; i < servers.size(); i++)
-                {
-                    // we need at least 14 bytes for this
-                    if (len < 14)
-                        break;
+            std::vector<ClientInfoRef> servers;
+            if (params.size() > 0) {
+                getServers(servers, game);
+            }
 
-                    ClientInfoRef server = servers[i];
-                    if (server->isDead())
+            for (size_t i = 0; i < servers.size(); i++)
+            {
+                ClientInfoRef server = servers[i];
+                if (server->isDead())
+                {
+                    continue;
+                }
+
+                // server header: 9 bytes
+                char type = 0x74;
+                outp.i8(type).I32(server->ip).I16(atoi(server->get("localport").c_str())).I16(server->port);
+
+                printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
+
+                // write server params as \xFF value1 \0 \FF value2 \0 ...
+                for (size_t j = 0; j < params.size(); j++)
+                {
+                    if (!server->has(params[j]))
                     {
+                        printf("[browser] [err] server %s doesn't have %s key\n", server->get("hostname").c_str(), params[j].c_str());
                         continue;
                     }
-
-                    // server header: 9 bytes
-                    char type = 0x74;
-                    ptr[0] = type;
-                    ptr++;
-                    ptr[0] = (server->ip >> 24) & 255;
-                    ptr[1] = (server->ip >> 16) & 255;
-                    ptr[2] = (server->ip >> 8) & 255;
-                    ptr[3] = (server->ip) & 255;
-                    int inn_port = atoi(server->get("localport").c_str());
-                    ptr[4] = (inn_port >> 8) & 255;
-                    ptr[5] = (inn_port) & 255;
-
-                    ptr[6] = (server->port >> 8) & 255;
-                    ptr[7] = (server->port) & 255;
-                    ptr += 8;
-                    len -= 9;
-
-                    printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
-
-                    // write server params as \xFF value1 \0 \FF value2 \0 ...
-                    for (size_t j = 0; j < params.size(); j++)
-                    {
-                        if (!server->has(params[j]))
-                        {
-                            printf("[browser] [err] server %s doesn't have %s key\n", server->get("hostname").c_str(), params[j].c_str());
-                            continue;
-                        }
-                        std::string param = server->get(params[j]);
-                        size_t pl = param.length();
-                        // check for possible overflow
-                        if (pl + 2 >= len)
-                            break;
-                        len -= pl + 2;
-                        // it starts with \xFF
-                        ptr[0] = 0xFF;
-                        ptr++;
-                        if (pl == 0)
-                        {
-                            // if length is zero, just write zero
-                            ptr[0] = 0x00;
-                            ptr++;
-                        }
-                        else
-                        {
-                            // otherwise write value with length + 1, as [length + 1] = \0
-                            memcpy(ptr, param.c_str(), pl + 1);
-                            ptr += pl + 1;
-                        }
-                    }
+                    outp.i8(0xFF).sz(server->get(params[j]));
                 }
+            }
 
-                // server list ends as \0 \xFF \xFF \xFF \x FF
-                if (len >= 5) {
-                    ptr[0] = 0x00;
-                    ptr++;
-                    ptr[0] = 0xFF;
-                    ptr[1] = 0xFF;
-                    ptr[2] = 0xFF;
-                    ptr[3] = 0xFF;
-                    ptr += 4;
-                }
-
-                len = ptr - outp;
-
-                // write header with requesters IP, port and num params
-                out[0] = (ip >> 24) & 255;
-                out[1] = (ip >> 16) & 255;
-                out[2] = (ip >> 8) & 255;
-                out[3] = (ip) & 255;
-
-                out[4] = (port >> 8) & 255;
-                out[5] = port & 255;
-
-                size_t num = params.size();
-
-                out[7] = (num >> 8) & 255;
-                out[6] = (num) & 255;
-
+            // server list ends as \0 \xFF \xFF \xFF \x FF
+            outp.i8(0).I32(-1);
 #ifdef DEBUG
-                debugOutput(outp, len);
+            debugOutput(outp.raw(), outp.size());
 #endif
-                if (params.size() > 0) {
-                    // only do this if server list was actually requested
-                    enctypex_func6e((unsigned char*)encxkeyb, ((unsigned char*)outp) + headerLen, (int)(len - headerLen));
-
-                    printf("[browser] [info] sending server list to %016llX, challenge: %016llX / %016llX\n", getId(), *(unsigned long long*)challenge, *(unsigned long long*)challenge_str);
-
-                    sendTCPResponse(len);
-                }
-                else if (headerLen > 0) {
-                    printf("[browser] [info] sending just header to %016llX\n", getId());
-                    // otherwise jsut send header if requested
-                    sendTCPResponse(headerLen);
-                    //crypto_sent = false;
-                }
+            if (params.size() > 0) {
+                // only do this if server list was actually requested
+                outp.seek(headerLen);
+                enctypex_func6e((unsigned char*)encxkeyb, outp);
+                printf("[browser] [info] sending server list to %016llX, challenge: %016llX\n", getId(), *(unsigned long long*)challenge_str);
+                sendTCPResponse(outp.size());
+            } else if (headerLen > 0) {
+                printf("[browser] [info] sending just header to %016llX\n", getId());
+                // otherwise jsut send header if requested
+                sendTCPResponse(headerLen);
+                //crypto_sent = false;
             }
         }
         else if (req_type == BROWSER_SERVER_INFO)
         {
-            int sv_ip = ((buff[1] & 0xFF) << 24) | ((buff[2] & 0xFF) << 16) | ((buff[3] & 0xFF) << 8) | ((buff[4] & 0xFF));
-            int sv_port = ((buff[5] & 0xFF) << 8) | ((buff[6] & 0xFF));
+            int sv_ip = rd.I32();
+            int sv_port = rd.I16();
 
             printf("[browser] [info] %016llX requesting info about %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
             ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
             if (server)
             {
-                memset(outp, 0, BROWSER_OUTPUT_BUFFER_SIZE);
                 int headerLen = 0;
-                size_t len = BROWSER_OUTPUT_BUFFER_SIZE - 20;
                 char gamekey[32] = "ZvZDcL";
-                char* ptr = prepareCryptoHeader(outp, gamekey, headerLen);
-                ptr += 20;
-                len -= headerLen;
+                outp.reset();
+                prepareCryptoHeader(outp, gamekey, headerLen);
+                // reserve header
+                for(int i=0; i<20; i++) outp.i8(0);
                 int flags = 0;
                 printf("[browser] [info] server found: %s\n", server->get("hostname").c_str());
                 fflush(stdout);
@@ -835,73 +725,28 @@ struct ClientInfo
                     if (kl == 0)
                         continue;
                     size_t pl = kl + vl + 2;
-                    if (pl >= len)
-                        break;
-                    len -= pl;
-                    memcpy(ptr, key.c_str(), kl + 1);
-                    ptr += kl + 1;
-                    if (vl == 0)
-                    {
-                        *ptr = 0;
-                        ptr++;
-                    }
-                    else
-                    {
-                        memcpy(ptr, val.c_str(), vl + 1);
-                        ptr += vl + 1;
-                    }
+                    outp.sz(key).sz(val);
                 }
                 // check for final overflow here
-                if (len > 0) {
-                    *ptr = 0;
-                    ptr++;
-                }
-                len = ptr - outp;
-
+                outp.i8(0);
+                int len = (int)outp.size();
                 // write header as u16[content length] + 0x2BE + server ip + server port + server local ip + server port + server ip
-                ptr = outp + headerLen;
-                ptr[0] = (len >> 8) & 0xFF;
-                ptr[1] = len & 0xFF;
-                ptr[2] = 0x02;
-                ptr[3] = 0xBE;
-                ptr += 4;
-
-                ptr[0] = (server->ip >> 24) & 255;
-                ptr[1] = (server->ip >> 16) & 255;
-                ptr[2] = (server->ip >> 8) & 255;
-                ptr[3] = (server->ip) & 255;
-                ptr += 4;
-
-                int inn_port = atoi(server->get("hostport").c_str());
-                ptr[0] = (inn_port >> 8) & 255;
-                ptr[1] = (inn_port) & 255;
-                ptr += 2;
-
+                outp.seek(headerLen);
+                
                 int i0, i1, i2, i3;
                 sscanf(server->get("localip0").c_str(), "%d.%d.%d.%d", &i0, &i1, &i2, &i3);
-                ptr[0] = i0 & 255;
-                ptr[1] = i1 & 255;
-                ptr[2] = i2 & 255;
-                ptr[3] = i3 & 255;
-                ptr += 4;
-
-                inn_port = atoi(server->get("hostport").c_str());
-                ptr[0] = (inn_port >> 8) & 255;
-                ptr[1] = (inn_port) & 255;
-                ptr += 2;
-
-                ptr[0] = (server->ip >> 24) & 255;
-                ptr[1] = (server->ip >> 16) & 255;
-                ptr[2] = (server->ip >> 8) & 255;
-                ptr[3] = (server->ip) & 255;
-                ptr += 4;
+                
+                outp.I16(len).I16(0x02BE).I32(server->ip).I16(atoi(server->get("hostport").c_str()));
+                outp.i8(i0).i8(i1).i8(i2).i8(i3).I16(atoi(server->get("hostport").c_str()));
+                outp.I32(server->ip);
 
                 printf("[browser] [info] sending server info to %016llX, length: %zd bytes, challenge: %016llX\n", getId(), len, *(unsigned long long*)challenge_str);
 #ifdef DEBUG
-                debugOutput(outp, len);
+                debugOutput(outp.raw(), outp.size());
 #endif
-                enctypex_func6e((unsigned char*)encxkeyb, ((unsigned char*)outp) + headerLen, (int)(len - headerLen));
-                sendTCPResponse(len);
+                outp.seek(headerLen);
+                enctypex_func6e((unsigned char*)encxkeyb, outp);
+                sendTCPResponse(outp.size());
             }
         }
         else if (req_type == BROWSER_FORWARD)
@@ -912,7 +757,8 @@ struct ClientInfo
             ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
             if (server && !server->throwaway)
             {
-                server->forwardBytes(this, buff + 9, 10);
+                rd.seek(9);
+                server->forwardBytes(this, rd.cur(), rd.capacity());
             }
         }
     }
@@ -921,16 +767,16 @@ struct ClientInfo
     {
         traffic_out += len;
 #ifdef DEBUG
-        debugOutputCArray(sideBuffer ? outp_aside : outp, len);
+        debugOutputCArray(sideBuffer ? outp_aside.raw() : outp.raw(), len);
 #endif
-        return sendto(sv_port == MASTER_PORT ? master_socket : forwarder_socket, sideBuffer ? outp_aside : outp, len, 0, (sockaddr*)&ci, cl);
+        return sendto(sv_port == MASTER_PORT ? master_socket : forwarder_socket, sideBuffer ? outp_aside.raw() : outp.raw(), len, 0, (sockaddr*)&ci, cl);
     }
 
     int sendTCPResponse(size_t len)
     {
         traffic_out += len;
 #ifdef DEBUG
-        debugOutputCArray(outp, len);
+        debugOutputCArray(outp.raw(), len);
 
         printf("client sock: %d, outp: %p, len: %d", client_sock, outp, len);
 #endif
@@ -938,22 +784,23 @@ struct ClientInfo
 #ifdef TEST
         return 0;
 #else
-        return send(client_sock, outp, (int)len, SEND_FLAGS);
+        return send(client_sock, outp.raw(), (int)len, SEND_FLAGS);
 #endif
     }
 
-    void forwardBytes(ClientInfo* from, char* buff, int len)
+    void forwardBytes(ClientInfo* from, const char* buff, int len)
     {
         if (len > 240)
             len = 240;
+        outp_aside.reset().i16(0xFEFD).i8(0x06);
         outp_aside[0] = 0xFE;
         outp_aside[1] = 0xFD;
         outp_aside[2] = 0x06;
-        memcpy(outp_aside + 3, &cookie, 4);
+        outp_aside.i32(cookie);
         for (int i = 0; i < 4; i++)
-            outp_aside[i + 6] = rand() & 0xFF;
-        memcpy(outp_aside + 10, buff, len);
-        sendUDPResponse(len, true);
+            outp_aside.i8(rand() & 0xFF);
+        outp_aside.bytes(buff, len);
+        sendUDPResponse(outp_aside.size(), true);
     }
 
     static inline server_id makeId(int cl_ip, int cl_port, int svc_port)
@@ -988,7 +835,12 @@ struct ClientInfo
                 }
                 else if (len > 0)
                 {
-                    client->processStream(client->inp, len);
+                    try {
+                        client->processStream(client->inp, len);
+                    } catch(std::runtime_error& err) {
+                        printf("[browser] [err] error during stream processing: %s\n", err.what());
+                        client->requestKill();
+                    }
                 }
             }
         }
@@ -1015,26 +867,39 @@ struct ClientInfo
         return str;
     }
 
-    char* prepareCryptoHeader(char* buff, char* gamekey, int& headerLen)
+    IOBuf& prepareCryptoHeader(IOBuf& outp, char* gamekey, int& headerLen)
     {
         if (crypto_sent)
         {
             headerLen = 0;
-            return buff;
+            return outp;
         }
         memcpy(challenge_str, challenge_str + 8, 8);
-        char* ptr = buff;
         headerLen = 37;
 
-        memset(buff, 'A', 37);
-        buff[0] = 230;
-        buff[1] = 0;
-        buff[2] = 0;
-        buff[11] = 243;
+        for(int i=0; i<37; i++) {
+            switch(i) {
+                case 0:
+                    outp.i8(230);
+                    break;
+                case 1:
+                case 2:
+                    outp.i8(0);
+                    break;
+                case 11:
+                    outp.i8(243);
+                    break;
+                default:
+                    outp.i8('A');
+                    break;
+            }
+        }
 
-        enctypex_funcx((unsigned char*)encxkeyb, (unsigned char*)gamekey, (unsigned char*)challenge_str, (unsigned char*)buff + 12, 25);
+        outp.seek(12);
+        enctypex_funcx((unsigned char*)encxkeyb, (unsigned char*)gamekey, (unsigned char*)challenge_str, outp);
+        outp.end();
         crypto_sent = true;
-        return buff + headerLen;
+        return outp;
     }
 };
 
@@ -1180,7 +1045,7 @@ ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
     }
 }
 
-void debugOutput(char* p, int len)
+void debugOutput(const char* p, int len)
 {
     for (int i = 0; i < len; i++)
     {
@@ -1194,7 +1059,7 @@ void debugOutput(char* p, int len)
     fflush(stdout);
 }
 
-void debugOutputCArray(char* p, int len)
+void debugOutputCArray(const char* p, int len)
 {
     printf("unsigned char buff[%d]={ ", len);
     for (int i = 0; i < len; i++)
@@ -1286,7 +1151,11 @@ int deployMaster()
             }
             printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
         }
-        client->processPacket(buffer, len);
+        try {
+            client->processPacket(buffer, len);
+        } catch(std::runtime_error& err) {
+            printf("[master] [error] error during packet processing: %s\n", err.what());
+        }
     }
     return 0;
 }

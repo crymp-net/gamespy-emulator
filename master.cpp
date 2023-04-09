@@ -754,7 +754,7 @@ struct ClientInfo
             int sv_ip = rd.I32();
             int sv_port = rd.I16();
             printf("[browser] [info] %016llX requesting forwarding to %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
-            ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
+            ClientInfoRef server = findServer(sv_ip, sv_port, this->game, true);
             if (server && !server->throwaway)
             {
                 rd.seek(9);

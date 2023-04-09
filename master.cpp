@@ -751,8 +751,8 @@ struct ClientInfo
         }
         else if (req_type == BROWSER_FORWARD)
         {
-            int sv_ip = ((buff[3] & 0xFF) << 24) | ((buff[4] & 0xFF) << 16) | ((buff[5] & 0xFF) << 8) | ((buff[6] & 0xFF));
-            int sv_port = ((buff[7] & 0xFF) << 8) | ((buff[8] & 0xFF));
+            int sv_ip = rd.I32();
+            int sv_port = rd.I16();
             printf("[browser] [info] %016llX requesting forwarding to %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
             ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
             if (server && !server->throwaway)

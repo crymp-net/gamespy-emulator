@@ -1340,6 +1340,7 @@ SOCKET socketForHost(SOCKET sock, const char* host)
             ci.sin_addr = *ip;
             ci.sin_port = htons(masterPort);
             ci.sin_family = AF_INET;
+            printf("[sock] [info] resolved as %s", inet_ntoa(ci.sin_addr));
             if (connect(s, (const sockaddr*)&ci, sizeof(ci)) == 0)
             {
                 return s;

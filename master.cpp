@@ -2,9 +2,7 @@
 #define MASTER
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
-#ifndef SILENT
-#define DO_LOG
-#endif
+
 //#define TEST 
 //#define DEBUG
 #define USE_GC
@@ -62,11 +60,12 @@ typedef int socklen_t;
 
 #define PROXY_ENABLED
 
-#ifndef DO_LOG
-#ifdef printf
-#undef printf
-#endif
-#define printf(...) /* */
+#ifdef SILENT
+#define debugf(...) /* */
+#define errorf(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define errorf(...) fprintf(stderr, __VA_ARGS__)
+#define debugf(...) printf(__VA_ARGS__)
 #endif
 
 #include "lib/enctypex.h"
@@ -442,7 +441,7 @@ struct ClientInfo
         rd.seek(0);
         char type = rd.i8();
         int packet_id = rd.i32();
-        printf("[master] [info] packet type: %d, packet id: %08X, length: %d\n", type, packet_id, packet_len);
+        debugf("[master] [info] packet type: %d, packet id: %08X, length: %d\n", type, packet_id, packet_len);
         if (type == MASTER_REGISTER_SERVER && sv_port == MASTER_PORT)
         {
             game = rd.sz();
@@ -450,7 +449,7 @@ struct ClientInfo
             for (int i = 0; i < 8; i++)
                 outp.i8(0);
             this->sendUDPResponse(outp.size());
-            printf("[master] [msg] subscribed %s:%d to game: %s\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), game.c_str());
+            debugf("[master] [msg] subscribed %s:%d to game: %s\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), game.c_str());
         }
         else if (type == MASTER_UPDATE_SERVER && sv_port == MASTER_PORT)
         {
@@ -518,7 +517,7 @@ struct ClientInfo
                         std::string item = indexes[ctr % indexes.size()];
                         item += std::to_string(idx);
                         params[item] = val;
-                        // printf("item found: %s -> %s\n", item.c_str(), val.c_str());
+                        // debugf("item found: %s -> %s\n", item.c_str(), val.c_str());
                         val = "";
                         ctr++;
                     }
@@ -552,7 +551,7 @@ struct ClientInfo
             if (!sent_challenge)
                 this->sendUDPResponse(outp.size());
             sent_challenge = true;
-            printf("[master] [msg] updated server %s:%d, killed old: %d\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), existed ? 1 : 0);
+            debugf("[master] [msg] updated server %s:%d, killed old: %d\n", inet_ntoa(ci.sin_addr), ntohs(ci.sin_port), existed ? 1 : 0);
             // this->proxifyCrymp();
         }
         else if (type == MASTER_HEARTBEAT1 || type == MASTER_HEARTBEAT2)
@@ -643,14 +642,14 @@ struct ClientInfo
                 char type = 0x74;
                 outp.i8(type).I32(server->ip).I16(atoi(server->get("localport").c_str())).I16(server->port);
 
-                printf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
+                debugf("[browser] [info] adding server %s to list\n", server->get("hostname").c_str());
 
                 // write server params as \xFF value1 \0 \FF value2 \0 ...
                 for (size_t j = 0; j < params.size(); j++)
                 {
                     if (!server->has(params[j]))
                     {
-                        printf("[browser] [err] server %s doesn't have %s key\n", server->get("hostname").c_str(), params[j].c_str());
+                        errorf("[browser] [error] server %s doesn't have %s key\n", server->get("hostname").c_str(), params[j].c_str());
                         continue;
                     }
                     outp.i8(0xFF).sz(server->get(params[j]));
@@ -666,10 +665,10 @@ struct ClientInfo
                 // only do this if server list was actually requested
                 outp.seek(headerLen);
                 enctypex_func6e((unsigned char*)encxkeyb, outp);
-                printf("[browser] [info] sending server list to %016llX, challenge: %016llX\n", getId(), *(unsigned long long*)challenge_str);
+                debugf("[browser] [info] sending server list to %016llX, challenge: %016llX\n", getId(), *(unsigned long long*)challenge_str);
                 sendTCPResponse(outp.size());
             } else if (headerLen > 0) {
-                printf("[browser] [info] sending just header to %016llX\n", getId());
+                debugf("[browser] [info] sending just header to %016llX\n", getId());
                 // otherwise jsut send header if requested
                 sendTCPResponse(headerLen);
                 //crypto_sent = false;
@@ -680,7 +679,7 @@ struct ClientInfo
             int sv_ip = rd.I32();
             int sv_port = rd.I16();
 
-            printf("[browser] [info] %016llX requesting info about %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
+            debugf("[browser] [info] %016llX requesting info about %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
             ClientInfoRef server = findServer(sv_ip, sv_port, this->game);
             if (server)
             {
@@ -691,7 +690,7 @@ struct ClientInfo
                 // reserve header
                 for(int i=0; i<20; i++) outp.i8(0);
                 int flags = 0;
-                printf("[browser] [info] server found: %s\n", server->get("hostname").c_str());
+                debugf("[browser] [info] server found: %s\n", server->get("hostname").c_str());
                 fflush(stdout);
                 std::vector<std::string> req_params = {
                     "localip", "localport", "natneg", "gamename", "publicip", "publicport",
@@ -719,7 +718,7 @@ struct ClientInfo
                     if (val.length() == 0)
                         val = "0";
 #ifdef DEBUG
-                    printf("[browser] [info] adding %s,%s \n", key.c_str(), val.c_str());
+                    debugf("[browser] [info] adding %s,%s \n", key.c_str(), val.c_str());
                     fflush(stdout);
 #endif
                     size_t kl = key.length();
@@ -742,7 +741,7 @@ struct ClientInfo
                 outp.i8(i0).i8(i1).i8(i2).i8(i3).I16(atoi(server->get("hostport").c_str()));
                 outp.I32(server->ip);
 
-                printf("[browser] [info] sending server info to %016llX, length: %zd bytes, challenge: %016llX\n", getId(), len, *(unsigned long long*)challenge_str);
+                debugf("[browser] [info] sending server info to %016llX, length: %zd bytes, challenge: %016llX\n", getId(), len, *(unsigned long long*)challenge_str);
 #ifdef DEBUG
                 debugOutput(outp.raw(), outp.size());
 #endif
@@ -755,7 +754,7 @@ struct ClientInfo
         {
             int sv_ip = rd.I32();
             int sv_port = rd.I16();
-            printf("[browser] [info] %016llX requesting forwarding to %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
+            debugf("[browser] [info] %016llX requesting forwarding to %08X:%04X, game: %s\n", getId(), sv_ip, sv_port, this->game.c_str());
             ClientInfoRef server = findServer(sv_ip, sv_port, this->game, true);
             if (server && !server->throwaway)
             {
@@ -780,7 +779,7 @@ struct ClientInfo
 #ifdef DEBUG
         debugOutputCArray(outp.raw(), len);
 
-        printf("client sock: %d, outp: %p, len: %d", client_sock, outp, len);
+        debugf("client sock: %d, outp: %p, len: %d", client_sock, outp, len);
 #endif
 
 #ifdef TEST
@@ -811,7 +810,7 @@ struct ClientInfo
     {
         if (!client)
             return;
-        printf("[browser] [info] receive thread is active for %016llX\n", client->getId());
+        debugf("[browser] [info] receive thread is active for %016llX\n", client->getId());
         while (true && client)
         {
             short hdrlen;
@@ -819,7 +818,7 @@ struct ClientInfo
             if (hdr == 0) {
                 client->socket_dead = true;
                 CloseSocket(client->client_sock);
-                printf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), hdr, strerror(errno));
+                debugf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), hdr, strerror(errno));
                 return;
             }
             else if (hdr > 0) {
@@ -829,7 +828,7 @@ struct ClientInfo
                 {
                     client->socket_dead = true;
                     CloseSocket(client->client_sock);
-                    printf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), len, strerror(errno));
+                    debugf("[browser] [info] %016llX received %d bytes, closing (err: %s)\n", client->getId(), len, strerror(errno));
                     return;
                 }
                 else if (len > 0)
@@ -837,7 +836,7 @@ struct ClientInfo
                     try {
                         client->processStream(client->inp, len);
                     } catch(std::runtime_error& err) {
-                        printf("[browser] [err] error during stream processing: %s\n", err.what());
+                        errorf("[browser] [error] error during stream processing: %s\n", err.what());
                         client->requestKill();
                     }
                 }
@@ -913,7 +912,7 @@ void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool inte
         char buf[4000];
         if (res <= 0)
         {
-            printf("[browser] [err] failed to send HTTP request to master\n");
+            errorf("[browser] [error] failed to send HTTP request to master\n");
             return;
         }
         for (;;)
@@ -933,13 +932,13 @@ void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool inte
         auto pivot = data.find("\r\n\r\n");
         if (pivot == std::string::npos)
         {
-            printf("[browser] [err] couldn't find rnrn in master response\n");
+            errorf("[browser] [error] couldn't find rnrn in master response\n");
             return;
         }
         std::string servers_data = data.substr(pivot + 4);
         if (servers_data.length() < 2)
         {
-            printf("[browser] [err] didnt receve any servers\n");
+            errorf("[browser] [error] didnt receve any servers\n");
             return;
         }
         try
@@ -954,8 +953,8 @@ void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool inte
         }
         catch (std::exception& ex)
         {
-            printf("[browser] [err] failed to parse response JSON: %s\n", ex.what());
-            printf("[browser] [err] JSON response: %s\n", servers_data.c_str());
+            errorf("[browser] [error] failed to parse response JSON: %s\n", ex.what());
+            errorf("[browser] [error] JSON response: %s\n", servers_data.c_str());
             servers.clear();
             return;
         }
@@ -984,7 +983,7 @@ ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
         char buf[4000];
         if (res <= 0)
         {
-            printf("[browser] [err/2] failed to send HTTP request to master\n");
+            errorf("[browser] [err/2] failed to send HTTP request to master\n");
             return 0;
         }
         for (;;)
@@ -1004,13 +1003,13 @@ ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
         auto pivot = data.find("\r\n\r\n");
         if (pivot == std::string::npos)
         {
-            printf("[browser] [err/2] couldn't find rnrn in master response\n");
+            errorf("[browser] [err/2] couldn't find rnrn in master response\n");
             return 0;
         }
         std::string servers_data = data.substr(pivot + 4);
         if (servers_data.length() < 2)
         {
-            printf("[browser] [err/2] didnt receve any servers\n");
+            errorf("[browser] [err/2] didnt receve any servers\n");
             return 0;
         }
         try
@@ -1023,7 +1022,7 @@ ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
         }
         catch (std::exception& ex)
         {
-            printf("[browser] [err/2] failed to parse response JSON: %s\n", ex.what());
+            errorf("[browser] [err/2] failed to parse response JSON: %s\n", ex.what());
             return 0;
         }
     }
@@ -1050,27 +1049,27 @@ void debugOutput(const char* p, int len)
     {
 
         if (!isprint((unsigned int)p[i] & 255))
-            printf(" %02X ", (unsigned int)(p[i]) & 0xFF);
+            debugf(" %02X ", (unsigned int)(p[i]) & 0xFF);
         else
-            printf("%c", p[i]);
+            debugf("%c", p[i]);
     }
-    printf("\n\n-----------\n\n");
+    debugf("\n\n-----------\n\n");
     fflush(stdout);
 }
 
 void debugOutputCArray(const char* p, int len)
 {
-    printf("unsigned char buff[%d]={ ", len);
+    debugf("unsigned char buff[%d]={ ", len);
     for (int i = 0; i < len; i++)
     {
-        printf("0x%02X, ", p[i] & 0xFF);
+        debugf("0x%02X, ", p[i] & 0xFF);
     }
-    printf("};\n");
+    debugf("};\n");
 }
 
 int deployGarbageCollector()
 {
-    printf("[gc] garbage collector active\n");
+    debugf("[gc] garbage collector active\n");
     fflush(stdout);
     while (true)
     {
@@ -1080,7 +1079,7 @@ int deployGarbageCollector()
             ClientInfoRef client = it->second;
             if (client && client->isDead())
             {
-                printf("[gc] [info] removing %016llX for inactivity\n", client->getId());
+                debugf("[gc] [info] removing %016llX for inactivity\n", client->getId());
                 it = clients.erase(it);
             }
             else
@@ -1093,7 +1092,7 @@ int deployGarbageCollector()
 
 int deployMaster()
 {
-    printf("[master] [info] initiating master\n");
+    debugf("[master] [info] initiating master\n");
     fflush(stdout);
     master_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in si;
@@ -1102,10 +1101,10 @@ int deployMaster()
     si.sin_port = htons(MASTER_PORT);
     if (bind(master_socket, (sockaddr*)&si, sizeof(si)) < 0)
     {
-        printf("[master] [error] failed to bind to address: %s\n", strerror(errno));
+        errorf("[master] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
-    printf("[master] [info] master online\n");
+    debugf("[master] [info] master online\n");
     fflush(stdout);
     char buffer[2048]; // safe: 2048 > MTU ( 1500 )
     while (true)
@@ -1116,7 +1115,7 @@ int deployMaster()
         int len = recvfrom(master_socket, buffer, 2048, 0, (sockaddr*)&ci, &cl);
         if (len < 0)
         {
-            printf("[master] [error] failed to receive: %s\n", strerror(errno));
+            errorf("[master] [error] failed to receive: %s\n", strerror(errno));
         }
         int ip = ntohl(ci.sin_addr.s_addr);
         int port = ntohs(ci.sin_port);
@@ -1132,7 +1131,7 @@ int deployMaster()
                     clients.erase(it);
                     continue;
                 }
-                printf("[master] [info] reusing existing client (%016llX)\n", id);
+                debugf("[master] [info] reusing existing client (%016llX)\n", id);
             }
             else
             {
@@ -1143,17 +1142,17 @@ int deployMaster()
                 }
                 else
                 {
-                    printf("[master] [error] failed to allocate new client!!!\n");
+                    errorf("[master] [error] failed to allocate new client!!!\n");
                     continue;
                 }
-                printf("[master] [info] allocated new client (%016llX)\n", id);
+                debugf("[master] [info] allocated new client (%016llX)\n", id);
             }
-            printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
+            debugf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
         }
         try {
             client->processPacket(buffer, len);
         } catch(std::runtime_error& err) {
-            printf("[master] [error] error during packet processing: %s\n", err.what());
+            errorf("[master] [error] error during packet processing: %s\n", err.what());
         }
     }
     return 0;
@@ -1161,7 +1160,7 @@ int deployMaster()
 
 int deployForwarder()
 {
-    printf("[forwarder] [info] initiating master\n");
+    debugf("[forwarder] [info] initiating master\n");
     fflush(stdout);
     forwarder_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in si;
@@ -1170,10 +1169,10 @@ int deployForwarder()
     si.sin_port = htons(FORWARDER_PORT);
     if (bind(forwarder_socket, (sockaddr*)&si, sizeof(si)) < 0)
     {
-        printf("[forwarder] [error] failed to bind to address: %s\n", strerror(errno));
+        errorf("[forwarder] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
-    printf("[forwarder] [info] master online\n");
+    debugf("[forwarder] [info] master online\n");
     fflush(stdout);
     char buffer[2048]; // safe: 2048 > MTU ( 1500 )
     while (true)
@@ -1184,7 +1183,7 @@ int deployForwarder()
         int len = recvfrom(forwarder_socket, buffer, 2048, 0, (sockaddr*)&ci, &cl);
         if (len < 0)
         {
-            printf("[forwarder] [error] failed to receive: %s\n", strerror(errno));
+            errorf("[forwarder] [error] failed to receive: %s\n", strerror(errno));
         }
         int ip = ntohl(ci.sin_addr.s_addr);
         int port = ntohs(ci.sin_port);
@@ -1200,7 +1199,7 @@ int deployForwarder()
                     clients.erase(it);
                     continue;
                 }
-                printf("[master] [info] reusing existing client (%016llX)\n", id);
+                debugf("[master] [info] reusing existing client (%016llX)\n", id);
             }
             else
             {
@@ -1211,12 +1210,12 @@ int deployForwarder()
                 }
                 else
                 {
-                    printf("[master] [error] failed to allocate new client!!!\n");
+                    errorf("[master] [error] failed to allocate new client!!!\n");
                     continue;
                 }
-                printf("[master] [info] allocated new client (%016llX)\n", id);
+                debugf("[master] [info] allocated new client (%016llX)\n", id);
             }
-            printf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
+            debugf("[master] [info] received from %08X:%04X (%016llX) %d bytes\n", ip, port, id, len);
         }
         client->processFwdPacket(buffer, len);
     }
@@ -1225,7 +1224,7 @@ int deployForwarder()
 
 int deployServerBrowser()
 {
-    printf("[browser] [info] initiating server browser\n");
+    debugf("[browser] [info] initiating server browser\n");
     fflush(stdout);
     browser_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -1240,7 +1239,7 @@ int deployServerBrowser()
     si.sin_port = htons(BROWSER_PORT);
     if (bind(browser_socket, (sockaddr*)&si, sizeof(si)) < 0)
     {
-        printf("[browser] [error] failed to bind to address: %s\n", strerror(errno));
+        errorf("[browser] [error] failed to bind to address: %s\n", strerror(errno));
         return 1;
     }
     listen(browser_socket, 800);
@@ -1251,7 +1250,7 @@ int deployServerBrowser()
         SOCKET client_sock = accept(browser_socket, (sockaddr*)&ci, &cl);
         if (client_sock < 0)
         {
-            printf("[browser] [error] failed to accept: %s\n", strerror(errno));
+            errorf("[browser] [error] failed to accept: %s\n", strerror(errno));
             continue;
         }
 
@@ -1268,7 +1267,7 @@ int deployServerBrowser()
         ClientInfoRef client = 0;
         if (it != clients.end())
         {
-            printf("[browser] [info] reusing existing client (%016llX)\n", id);
+            debugf("[browser] [info] reusing existing client (%016llX)\n", id);
             client = it->second;
         }
         else
@@ -1277,11 +1276,11 @@ int deployServerBrowser()
             if (client)
             {
                 clients[id] = client;
-                printf("[browser] [info] allocated new client (%016llX)\n", id);
+                debugf("[browser] [info] allocated new client (%016llX)\n", id);
             }
             else
             {
-                printf("[browser] [error] failed to allocate new client!!!\n");
+                errorf("[browser] [error] failed to allocate new client!!!\n");
             }
         }
         clientMutex.unlock();
@@ -1319,7 +1318,7 @@ SOCKET socketForHost(SOCKET sock, const char* host)
     {
         s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (s < 0) {
-            printf("[sock] [err] failed to create new socket\n");
+            errorf("[sock] [error] failed to create new socket\n");
             return 0;
         }
     }
@@ -1333,27 +1332,27 @@ SOCKET socketForHost(SOCKET sock, const char* host)
             in_addr* ip = (in_addr*)h->h_addr;
             if (!ip)
             {
-                printf("[sock] [err] failed to resolve host, null ip\n");
+                errorf("[sock] [error] failed to resolve host, null ip\n");
                 return 0;
             }
             ZeroMem(ci);
             ci.sin_addr = *ip;
             ci.sin_port = htons(masterPort);
             ci.sin_family = AF_INET;
-            printf("[sock] [info] resolved as %s", inet_ntoa(ci.sin_addr));
+            debugf("[sock] [info] resolved as %s", inet_ntoa(ci.sin_addr));
             if (connect(s, (const sockaddr*)&ci, sizeof(ci)) == 0)
             {
                 return s;
             }
             else
             {
-                printf("[sock] [err] failed to connect\n");
+                errorf("[sock] [error] failed to connect\n");
                 return 0;
             }
         }
         else
         {
-            printf("[sock] [err] failed to resolve host name\n");
+            errorf("[sock] [error] failed to resolve host name\n");
             return 0;
         }
     }
@@ -1365,7 +1364,7 @@ SOCKET socketForHost(SOCKET sock, const char* host)
 
 SOCKET sendToProxy(ProxyRequest* req, SOCKET sock)
 {
-    printf("[proxy] [info] proxying request for %s (%s:%s)\n", req->params["name"].c_str(), req->params["proxy_ip"].c_str(), req->params["port"].c_str());
+    debugf("[proxy] [info] proxying request for %s (%s:%s)\n", req->params["name"].c_str(), req->params["proxy_ip"].c_str(), req->params["port"].c_str());
     std::string data = "POST " + req->script + " HTTP/1.1\r\nHost: " + req->host + "\r\nContent-type: application/x-www-form-urlencoded\r\nUser-Agent: GSEmu\r\nConnection: keep-alive\r\nContent-length: ";
     std::string query = "";
     bool first = true;
@@ -1385,11 +1384,11 @@ SOCKET sendToProxy(ProxyRequest* req, SOCKET sock)
     recv(sock, bf, sizeof(bf), 0);
     if (!strstr(bf, "200 OK"))
     {
-        printf("[proxy] [err] sending server %s:%s to proxy failed\n", req->params["proxy_ip"].c_str(), req->params["port"].c_str());
-        printf("request: %s\n", query.c_str());
-        printf("response: %s\n", bf);
+        errorf("[proxy] [error] sending server %s:%s to proxy failed\n", req->params["proxy_ip"].c_str(), req->params["port"].c_str());
+        debugf("request: %s\n", query.c_str());
+        debugf("response: %s\n", bf);
     }
-    // printf("[proxy] [info] received %s from proxy\n", bf);
+    // debugf("[proxy] [info] received %s from proxy\n", bf);
     return sock;
 }
 
@@ -1514,7 +1513,7 @@ int main(int argc, const char** argv)
         0x5c, 0x6d, 0x6f, 0x64, 0x76, 0x65, 0x72, 0x73,
         0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00 };
     client->processStream((char*)req1, sizeof(req1));
-    printf("sending second request\n");
+    debugf("sending second request\n");
     unsigned char req2[] = { 0x00, 0x09, 0x01, 0x7F, 0x00, 0x00, 0x01, 0xfa, 0x57 };
     client->processStream((char*)req2, sizeof(req2));
 #else

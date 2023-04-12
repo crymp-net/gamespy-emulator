@@ -2,7 +2,9 @@
 #define MASTER
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
+#ifndef SILENT
 #define DO_LOG
+#endif
 //#define TEST 
 //#define DEBUG
 #define USE_GC

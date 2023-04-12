@@ -12,5 +12,9 @@ else
     FLAGS="$FLAGS -lpthread"
 fi
 
+if [ "$SILENT" == "true" ]; then
+    FLAGS="$FLAGS -DSILENT=1"
+fi
+
 $CXX master.cpp $FLAGS -Wno-conversion -o bin/gsmaster
 $CC ping.c $FLAGS -o bin/ping

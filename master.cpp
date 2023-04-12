@@ -905,7 +905,7 @@ void getServers(std::vector<ClientInfoRef>& servers, std::string game, bool inte
     if (remoteList && !internal)
     {
         SOCKET sock = socketForHost(0, masterHost.c_str());
-        std::string cmd = std::string("GET /api/servers HTTP/1.1\r\nHost: ") + masterHost + "\r\nConnection: close\r\n\r\n";
+        std::string cmd = std::string("GET /api/servers HTTP/1.1\r\nHost: ") + masterHost + "\r\nUser-Agent: GSEmu\r\nConnection: close\r\n\r\n";
         int res = send(sock, cmd.c_str(), (int)cmd.length(), SEND_FLAGS);
         std::string data;
         char buf[4000];
@@ -976,7 +976,7 @@ ClientInfoRef findServer(int ip, int port, std::string game, bool internal)
     if (remoteList && !internal)
     {
         SOCKET sock = socketForHost(0, masterHost.c_str());
-        std::string cmd = std::string("GET /api/server?ip=") + ClientInfo::getStringIp(ip) + "&port=" + std::to_string(port) + " HTTP/1.1\r\nHost: " + masterHost + "\r\nConnection: close\r\n\r\n";
+        std::string cmd = std::string("GET /api/server?ip=") + ClientInfo::getStringIp(ip) + "&port=" + std::to_string(port) + " HTTP/1.1\r\nHost: " + masterHost + "\r\nUser-Agent: GSEmu\r\nConnection: close\r\n\r\n";
         int res = send(sock, cmd.c_str(), (int)cmd.length(), SEND_FLAGS);
         std::string data;
         char buf[4000];
@@ -1363,7 +1363,7 @@ SOCKET socketForHost(SOCKET sock, const char* host)
 SOCKET sendToProxy(ProxyRequest* req, SOCKET sock)
 {
     printf("[proxy] [info] proxying request for %s (%s:%s)\n", req->params["name"].c_str(), req->params["proxy_ip"].c_str(), req->params["port"].c_str());
-    std::string data = "POST " + req->script + " HTTP/1.1\r\nHost: " + req->host + "\r\nContent-type: application/x-www-form-urlencoded\r\nConnection: keep-alive\r\nContent-length: ";
+    std::string data = "POST " + req->script + " HTTP/1.1\r\nHost: " + req->host + "\r\nContent-type: application/x-www-form-urlencoded\r\nUser-Agent: GSEmu\r\nConnection: keep-alive\r\nContent-length: ";
     std::string query = "";
     bool first = true;
     for (auto& it : req->params)

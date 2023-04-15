@@ -753,7 +753,7 @@ struct ClientInfo
                 sendTCPResponse(outp.size());
             }
         }
-        else if (req_type == BROWSER_FORWARD)
+        /*else if (req_type == BROWSER_FORWARD)
         {
             int sv_ip = rd.I32();
             int sv_port = rd.I16();
@@ -764,7 +764,7 @@ struct ClientInfo
                 rd.seek(9);
                 server->forwardBytes(this, rd.cur(), rd.capacity());
             }
-        }
+        }*/
     }
 
     int sendUDPResponse(int len, bool sideBuffer = false)

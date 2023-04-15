@@ -3,7 +3,7 @@ mkdir -p bin
 CXX="${CXX:-g++}"
 CC="${CC:-gcc}"
 
-FLAGS="-O0 -g"
+FLAGS="-O0 -g -rdynamic"
 OS="$(uname -o)"
 
 if [ "$OS" = "Msys" ]; then
@@ -17,4 +17,4 @@ if [ "$SILENT" == "true" ]; then
 fi
 
 $CXX master.cpp $FLAGS -Wno-conversion -o bin/gsmaster
-$CC ping.c $FLAGS -o bin/ping
+$CC ping.c -O3 -s -o bin/ping

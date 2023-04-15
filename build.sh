@@ -1,9 +1,9 @@
 mkdir -p bin
 
 CXX="${CXX:-g++}"
-CC="${CC:gcc}"
+CC="${CC:-gcc}"
 
-FLAGS="-Os -s"
+FLAGS="-O0 -g"
 OS="$(uname -o)"
 
 if [ "$OS" = "Msys" ]; then

@@ -24,6 +24,9 @@
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
 #define CloseSocket(s) close(s)
 #define ZeroMem(a) bzero(&a, sizeof(a))
 #define Sleep(ms) usleep(ms * 1000)
@@ -1418,6 +1421,19 @@ void deployProxyDispatcher()
     }
 }
 
+void segfaultHandler(int sig) {
+      void *array[10];
+  size_t size;
+
+  // get void*'s for all entries on the stack
+  size = backtrace(array, 10);
+
+  // print out all the frames to stderr
+  fprintf(stderr, "Error: signal %d:\n", sig);
+  backtrace_symbols_fd(array, size, STDERR_FILENO);
+  exit(1);
+}
+
 int main(int argc, const char** argv)
 {
     for (int i = 0; i < argc - 1; i++)
@@ -1438,6 +1454,8 @@ int main(int argc, const char** argv)
 #ifdef _WIN32
     WSADATA wsaData;
     WSAStartup(0x202, &wsaData);
+#else
+    signal(SIGSEGV, segfaultHandler);
 #endif
 #ifdef PROXY_ENABLED
     std::thread proxyThread(deployProxyDispatcher);
